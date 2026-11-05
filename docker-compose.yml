@@ -1,0 +1,28 @@
+services:
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_DATABASE: gym
+      MYSQL_USER: gym
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?}
+    volumes:
+      - gym-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    build: {context: ., target: api}
+    env_file: .env
+    environment:
+      MYSQL_DSN: gym:${MYSQL_PASSWORD}@tcp(mysql:3306)/gym?charset=utf8mb4&parseTime=true&loc=UTC
+    depends_on:
+      mysql: {condition: service_healthy}
+  web:
+    build: {context: ., target: web}
+    ports: ["127.0.0.1:18080:80"]
+    depends_on: [api]
+volumes:
+  gym-data:

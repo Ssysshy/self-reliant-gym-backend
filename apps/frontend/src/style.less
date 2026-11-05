@@ -1,0 +1,75 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  background: #f8f9f5;
+  color: #20231e;
+  font-family: system-ui, sans-serif;
+}
+.layout {
+  display: grid;
+  grid-template-columns: 225px 1fr;
+  min-height: 100vh;
+}
+aside {
+  background: #20251f;
+  color: white;
+  padding: 48px 24px;
+}
+aside strong {
+  font-size: 22px;
+}
+small {
+  display: block;
+  margin: 6px 0 36px;
+  letter-spacing: 0.15em;
+  color: #949e8d;
+}
+aside button {
+  width: 100%;
+  text-align: left;
+  padding: 14px 16px;
+  background: transparent;
+  border: 0;
+  color: #d3d9cc;
+  font-size: 15px;
+  cursor: pointer;
+}
+aside button[aria-current="true"] {
+  background: #dae7c6;
+  color: #20251f;
+  border-radius: 7px;
+}
+main {
+  padding: 48px clamp(24px, 5vw, 90px);
+  min-width: 0;
+}
+h1 {
+  margin: 0 0 30px;
+  font-size: 36px;
+}
+.ant-table-wrapper {
+  margin-top: 24px;
+}
+.login {
+  max-width: 450px;
+  margin: 10vh auto;
+  background: white;
+  border: 1px solid #dedfd8;
+  padding: 40px;
+}
+.line {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.line .ant-form-item {
+  min-width: 0;
+}
+section {
+  padding: 16px;
+  border: 1px solid #ddd;
+  border-radius: 10px;
+  margin: 12px 0;
+}
