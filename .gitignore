@@ -20,3 +20,6 @@ bin-release/
 .env
 .local/
 node_modules/
+
+# deploy/build.sh 的本地产物（前端静态页、linux 二进制、镜像 tar）
+deploy/dist/

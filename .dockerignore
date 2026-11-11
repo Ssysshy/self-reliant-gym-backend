@@ -1,5 +1,8 @@
+# 必须留在仓库根：Docker 按构建上下文根解析，而 deploy/docker-compose.yml 的 context 就是仓库根
 .git
 .env
 **/node_modules
 **/.local
 docs
+# deploy/Dockerfile.pack 只允许看到编译产物，镜像 tar 别混进构建上下文
+deploy/dist/gym-images.tar

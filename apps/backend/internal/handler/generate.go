@@ -47,7 +47,9 @@ func generate(c *gin.Context) {
 		day := Day{Weekday: weekday, Focus: input.Focus}
 		seconds := input.Minutes * 60
 		for _, x := range exercises {
-			if allowed[x.Equipment] && (input.Focus == "全身" || input.Focus == x.Muscle) && seconds >= 240 {
+			// 可用器材按「分类或具体器材」匹配：小程序让用户勾的是 器械/杠铃/哑铃 这类分类，
+			// 早期按具体器材名存的历史数据也还能命中。
+			if (allowed[x.Category] || allowed[x.Equipment]) && (input.Focus == "全身" || input.Focus == x.Muscle) && seconds >= 240 {
 				day.Items = append(day.Items, Item{Name: x.Name, Sets: 2, Reps: 10, Rest: 60})
 				seconds -= 240
 			}

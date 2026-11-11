@@ -1,0 +1,54 @@
+# 部署编排。在仓库根目录执行：
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
+# --env-file 提供 ${MYSQL_PASSWORD} 等插值，同时作为容器运行时的 env_file（相对本文件指向 ../.env）
+# name 固定项目名，避免文件搬家后网络名/卷名变成 deploy_*
+name: self-reliant-gym-backend
+# 按 2C2G 机器配的内存预算（宿主机系统 + dockerd 约 350MB，容器合计上限 832MB，
+# 留 800MB 左右给文件缓存）。改大任何一项之前先确认 free -h 还有余量。
+services:
+  mysql:
+    image: mysql:8.4
+    # mysqld 必须写全：mysql 官方镜像的 ENTRYPOINT 是 docker-entrypoint.sh，
+    # command 会整体替换默认的 CMD ["mysqld"]。
+    command:
+      - mysqld
+      # 性能采集对本项目没有意义，关掉能省 100MB 以上常驻内存
+      - --performance-schema=OFF
+      # 8.4 默认就是 128M，写出来是为了防止未来版本改动默认值时被悄悄放大
+      - --innodb-buffer-pool-size=128M
+      # 默认 151 个连接，每个连接都有线程栈和缓冲区；小程序 + 后台撑不到 50
+      - --max-connections=50
+      # 只按 IP/服务名连接，跳过反查主机名，省 DNS 开销
+      - --skip-name-resolve
+    mem_limit: 640m
+    environment:
+      MYSQL_DATABASE: gym
+      MYSQL_USER: gym
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?.env 缺少 MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?.env 缺少 MYSQL_ROOT_PASSWORD}
+    volumes:
+      - gym-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    # 只在容器网络内可达；宿主机仍用本机 MySQL，不抢 3306
+    expose:
+      - "3306"
+  api:
+    build: {context: .., target: api, dockerfile: deploy/Dockerfile}
+    mem_limit: 128m
+    env_file: ../.env
+    environment:
+      # 容器内走服务名连接，覆盖 .env 里给宿主机 go run 用的 127.0.0.1
+      MYSQL_DSN: gym:${MYSQL_PASSWORD}@tcp(mysql:3306)/gym?charset=utf8mb4&parseTime=true&loc=UTC
+    depends_on:
+      mysql: {condition: service_healthy}
+  web:
+    build: {context: .., target: web, dockerfile: deploy/Dockerfile}
+    mem_limit: 64m
+    ports: ["127.0.0.1:18080:80"]
+    depends_on: [api]
+volumes:
+  gym-data:

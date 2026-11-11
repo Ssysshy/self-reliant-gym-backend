@@ -1,0 +1,19 @@
+# 只打包、不编译。
+# 编译产物由 deploy/build.sh 在本机（macOS/arm64）原生生成：
+#   前端  pnpm exec vite build      -> deploy/dist/web
+#   后端  GOOS=linux GOARCH=amd64   -> deploy/dist/gym
+# 因此这里没有任何 node/go 编译步骤，构建只做 COPY，不需要 QEMU 模拟。
+# 构建上下文是仓库根，与 deploy/Dockerfile 保持一致。
+# 镜像名必须和 compose 推导出的名字一致，服务器上 docker load 后
+# 直接 compose up -d（不带 --build）即可复用，不会触发重新构建。
+
+FROM nginx:alpine AS web
+COPY deploy/nginx.conf /etc/nginx/conf.d/default.conf
+COPY deploy/dist/web /usr/share/nginx/html
+
+FROM alpine:3 AS api
+# Go 调微信、XPAY 走 HTTPS，必须带根证书；时区库供 time.LoadLocation 使用
+RUN apk add --no-cache ca-certificates tzdata
+COPY deploy/dist/gym /usr/local/bin/gym
+USER nobody
+CMD ["gym"]

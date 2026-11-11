@@ -1,7 +1,11 @@
 package main
 
-import "gym/internal/handler"
+import (
+	"gym/internal/config"
+	"gym/internal/handler"
+)
 
 func main() {
+	config.LoadDotEnv()
 	handler.Run()
 }

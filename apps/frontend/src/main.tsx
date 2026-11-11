@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Button,
@@ -10,6 +10,7 @@ import {
   Select,
   Space,
   Table,
+  Tag,
   message,
 } from "antd";
 import zhCN from "antd/locale/zh_CN";
@@ -37,6 +38,16 @@ interface Product {
   Days: number;
   Price: number;
   Enabled: boolean;
+}
+interface FeedbackRow {
+  ID: number;
+  Owner: number;
+  Content: string;
+  Status: string;
+  HandledBy: string | null;
+  Note: string | null;
+  HandledAt: string | null;
+  CreatedAt: string;
 }
 interface Audit {
   ID: number;
@@ -68,10 +79,36 @@ interface Exercise {
   ID: number;
   Name: string;
   Muscle: string;
+  SubMuscle: string;
+  Category: string;
   Equipment: string;
   Guide: string;
   Setup: string;
+  AuxMuscles: string;
+  Mistakes: string;
+  ImageURL: string;
 }
+interface Part {
+  Name: string;
+  Subs: string[] | null;
+}
+interface Meta {
+  Parts: Part[];
+  Categories: string[];
+}
+const emptyExercise = (): Exercise => ({
+  ID: 0,
+  Name: "",
+  Muscle: "",
+  SubMuscle: "",
+  Category: "",
+  Equipment: "",
+  Guide: "",
+  Setup: "",
+  AuxMuscles: "",
+  Mistakes: "",
+  ImageURL: "",
+});
 async function api<T>(
   path: string,
   body?: unknown,
@@ -97,6 +134,117 @@ const blankDay = (): Day => ({
   Focus: "全身",
   Items: [{ Name: "坐姿推胸", Sets: 3, Reps: 10, Rest: 60 }],
 });
+// 动作资料表单：细分肌群的可选值依赖已选部位，所以单独拆一个组件拿 Form 实例。
+function ExerciseForm({
+  entry,
+  meta,
+  onDone,
+}: {
+  entry: Exercise;
+  meta: Meta | null;
+  onDone: () => void;
+}): React.JSX.Element {
+  const [form] = Form.useForm();
+  const part = Form.useWatch("Muscle", form) as string | undefined;
+  const subs = meta?.Parts.find((p) => p.Name === part)?.Subs || [];
+  const previous = useRef(part);
+  // 换部位时清掉上一部位留下的细分，首次渲染（编辑已有动作）不动它。
+  useEffect(() => {
+    if (previous.current !== part) {
+      form.setFieldValue("SubMuscle", undefined);
+      previous.current = part;
+    }
+  }, [part, form]);
+  return (
+    <Form
+      form={form}
+      initialValues={entry}
+      layout="vertical"
+      onFinish={async (v: Exercise) => {
+        try {
+          await api("/exercises", { ...entry, ...v });
+          onDone();
+        } catch (e) {
+          report(e);
+        }
+      }}
+    >
+      <Form.Item name="Name" label="动作名称" rules={[{ required: true }]}>
+        <Input />
+      </Form.Item>
+      <Space align="start">
+        <Form.Item
+          name="Muscle"
+          label="部位"
+          rules={[{ required: true, message: "请选择部位" }]}
+        >
+          <Select
+            style={{ width: 130 }}
+            placeholder="选择部位"
+            options={(meta?.Parts || []).map((p) => ({
+              label: p.Name,
+              value: p.Name,
+            }))}
+          />
+        </Form.Item>
+        <Form.Item name="SubMuscle" label="细分肌群">
+          <Select
+            style={{ width: 130 }}
+            allowClear
+            disabled={subs.length === 0}
+            placeholder={subs.length ? "可留空" : "该部位无细分"}
+            options={subs.map((s) => ({ label: s, value: s }))}
+          />
+        </Form.Item>
+        <Form.Item
+          name="Category"
+          label="器材分类"
+          rules={[{ required: true, message: "请选择器材分类" }]}
+        >
+          <Select
+            style={{ width: 130 }}
+            placeholder="选择分类"
+            options={(meta?.Categories || []).map((c) => ({
+              label: c,
+              value: c,
+            }))}
+          />
+        </Form.Item>
+        <Form.Item
+          name="Equipment"
+          label="具体器材"
+          rules={[{ required: true }]}
+        >
+          <Input style={{ width: 160 }} placeholder="推胸机 / 训练垫" />
+        </Form.Item>
+      </Space>
+      <Form.Item name="Setup" label="器材调节" rules={[{ required: true }]}>
+        <Input />
+      </Form.Item>
+      <Form.Item name="Guide" label="动作步骤" rules={[{ required: true }]}>
+        <Input.TextArea rows={3} />
+      </Form.Item>
+      <Form.Item name="AuxMuscles" label="辅助肌群">
+        <Input />
+      </Form.Item>
+      <Form.Item name="Mistakes" label="常见错误">
+        <Input.TextArea rows={2} />
+      </Form.Item>
+      <Form.Item
+        name="ImageURL"
+        label="示范图 HTTPS 地址"
+        rules={[
+          { pattern: /^https:\/\/\S+$/, message: "示范图须使用 HTTPS 地址" },
+        ]}
+      >
+        <Input placeholder="https://" />
+      </Form.Item>
+      <Button htmlType="submit" type="primary">
+        保存资料
+      </Button>
+    </Form>
+  );
+}
 function Console(): React.JSX.Element {
   const [logged, setLogged] = useState(false),
     [page, setPage] = useState("训练模板"),
@@ -114,12 +262,21 @@ function Console(): React.JSX.Element {
     [admin, setAdmin] = useState(false),
     [audit, setAudit] = useState<Audit[]>([]),
     [catalog, setCatalog] = useState<Exercise[]>([]),
+    [feedbacks, setFeedbacks] = useState<FeedbackRow[]>([]),
+    [fbStatus, setFbStatus] = useState("待处理"),
+    [fbEdit, setFbEdit] = useState<FeedbackRow | null>(null),
+    [fbNote, setFbNote] = useState(""),
     [entry, setEntry] = useState<Exercise | null>(null),
+    [meta, setMeta] = useState<Meta | null>(null),
+    [part, setPart] = useState(""),
+    [gear, setGear] = useState(""),
+    [kw, setKw] = useState(""),
     [query, setQuery] = useState("");
   async function refresh(): Promise<void> {
     const rows = await api<Plan[]>("/templates");
     setPlans(rows);
     setCatalog(await api<Exercise[]>("/exercises"));
+    setMeta(await api<Meta>("/categories"));
     setAdmin((await api<{ admin: boolean }>("/me")).admin);
     setLogged(true);
   }
@@ -132,11 +289,20 @@ function Console(): React.JSX.Element {
   async function loadMembers(): Promise<void> {
     setMembers(await api<Member[]>("/members?id=" + encodeURIComponent(query)));
   }
+  async function loadFeedbacks(status: string): Promise<void> {
+    setFbStatus(status);
+    setFeedbacks(
+      await api<FeedbackRow[]>(
+        status ? "/feedbacks?status=" + encodeURIComponent(status) : "/feedbacks",
+      ),
+    );
+  }
   async function openPage(p: string): Promise<void> {
     if (p === "操作记录") setAudit(await api<Audit[]>("/audit"));
     if (p === "会员套餐") setProducts(await api<Product[]>("/products"));
     if (p === "会员订单") setOrderRows(await api<Order[]>("/orders"));
     if (p === "会员管理") await loadMembers();
+    if (p === "用户反馈") await loadFeedbacks(fbStatus);
     if (p === "训练资料" || p === "训练模板")
       setCatalog(await api<Exercise[]>("/exercises"));
     setPage(p);
@@ -193,6 +359,7 @@ function Console(): React.JSX.Element {
           "会员管理",
           "会员套餐",
           "会员订单",
+          "用户反馈",
           ...(admin ? ["操作记录"] : []),
         ].map((p) => (
           <button
@@ -256,29 +423,88 @@ function Console(): React.JSX.Element {
         )}
         {page === "训练资料" && (
           <>
-            <Button
-              onClick={() =>
-                setEntry({
-                  ID: 0,
-                  Name: "",
-                  Muscle: "",
-                  Equipment: "",
-                  Setup: "",
-                  Guide: "",
-                })
-              }
-            >
-              新增动作
-            </Button>
+            <Space style={{ marginBottom: 16 }} wrap>
+              <Select
+                style={{ width: 120 }}
+                placeholder="全部部位"
+                allowClear
+                value={part || undefined}
+                onChange={(v: string | undefined) => setPart(v || "")}
+                options={(meta?.Parts || []).map((p) => ({
+                  label: p.Name,
+                  value: p.Name,
+                }))}
+              />
+              <Select
+                style={{ width: 130 }}
+                placeholder="全部器材分类"
+                allowClear
+                value={gear || undefined}
+                onChange={(v: string | undefined) => setGear(v || "")}
+                options={(meta?.Categories || []).map((c) => ({
+                  label: c,
+                  value: c,
+                }))}
+              />
+              <Input
+                style={{ width: 200 }}
+                placeholder="搜索动作或器材"
+                allowClear
+                value={kw}
+                onChange={(e) => setKw(e.target.value)}
+              />
+              <Button onClick={() => setEntry(emptyExercise())}>新增动作</Button>
+            </Space>
             <Table
               rowKey="ID"
-              dataSource={catalog}
+              dataSource={catalog.filter(
+                (x) =>
+                  (!part || x.Muscle === part) &&
+                  (!gear || x.Category === gear) &&
+                  (!kw ||
+                    (x.Name + x.SubMuscle + x.Equipment).includes(kw.trim())),
+              )}
+              locale={{ emptyText: "没有符合条件的动作" }}
+              pagination={{ pageSize: 20, hideOnSinglePage: true }}
               columns={[
-                { title: "动作", dataIndex: "Name" },
-                { title: "肌群", dataIndex: "Muscle" },
-                { title: "器材", dataIndex: "Equipment" },
+                {
+                  title: "动作",
+                  dataIndex: "Name",
+                  render: (v: string, x: Exercise) => (
+                    <Space>
+                      {x.ImageURL && (
+                        <img
+                          src={x.ImageURL}
+                          alt=""
+                          style={{ width: 40, height: 40, objectFit: "contain" }}
+                        />
+                      )}
+                      <span>{v}</span>
+                    </Space>
+                  ),
+                },
+                {
+                  title: "部位",
+                  dataIndex: "Muscle",
+                  width: 90,
+                  render: (v: string) => <Tag color="blue">{v || "-"}</Tag>,
+                },
+                {
+                  title: "细分肌群",
+                  dataIndex: "SubMuscle",
+                  width: 100,
+                  render: (v: string) => v || "-",
+                },
+                {
+                  title: "器材分类",
+                  dataIndex: "Category",
+                  width: 100,
+                  render: (v: string) => v || "-",
+                },
+                { title: "具体器材", dataIndex: "Equipment", width: 150 },
                 {
                   title: "",
+                  width: 80,
                   render: (_, x: Exercise) => (
                     <Button onClick={() => setEntry(x)}>编辑</Button>
                   ),
@@ -334,6 +560,110 @@ function Console(): React.JSX.Element {
               { title: "时间", dataIndex: "CreatedAt" },
             ]}
           />
+        )}
+        {page === "用户反馈" && (
+          <>
+            <Space style={{ marginBottom: 16 }}>
+              {["待处理", "已处理", ""].map((s) => (
+                <Button
+                  key={s || "全部"}
+                  type={fbStatus === s ? "primary" : "default"}
+                  onClick={() => void loadFeedbacks(s).catch(report)}
+                >
+                  {s || "全部"}
+                </Button>
+              ))}
+            </Space>
+            <Table
+              rowKey="ID"
+              dataSource={feedbacks}
+              locale={{ emptyText: "没有符合条件的反馈" }}
+              columns={[
+                {
+                  title: "状态",
+                  dataIndex: "Status",
+                  width: 92,
+                  render: (v: string) => (
+                    <Tag color={v === "已处理" ? "green" : "orange"}>{v}</Tag>
+                  ),
+                },
+                { title: "用户编号", dataIndex: "Owner", width: 92 },
+                {
+                  title: "反馈内容",
+                  dataIndex: "Content",
+                  render: (v: string) => (
+                    <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{v}</div>
+                  ),
+                },
+                {
+                  title: "处理人",
+                  dataIndex: "HandledBy",
+                  width: 100,
+                  render: (v: string | null) => v || "-",
+                },
+                {
+                  title: "备注",
+                  dataIndex: "Note",
+                  width: 180,
+                  render: (v: string | null) => v || "-",
+                },
+                {
+                  title: "提交时间",
+                  dataIndex: "CreatedAt",
+                  width: 180,
+                  render: (v: string) => new Date(v).toLocaleString("zh-CN"),
+                },
+                {
+                  title: "",
+                  width: 120,
+                  render: (_: unknown, r: FeedbackRow) => (
+                    <Button
+                      onClick={() => {
+                        setFbEdit(r);
+                        setFbNote(r.Note || "");
+                      }}
+                    >
+                      {r.Status === "已处理" ? "退回待处理" : "标记已处理"}
+                    </Button>
+                  ),
+                },
+              ]}
+            />
+            <Modal
+              open={!!fbEdit}
+              title={fbEdit?.Status === "已处理" ? "退回待处理" : "标记已处理"}
+              okText="确认"
+              onCancel={() => setFbEdit(null)}
+              onOk={async () => {
+                if (!fbEdit) return;
+                try {
+                  await api(
+                    "/feedbacks/" + fbEdit.ID,
+                    {
+                      Status: fbEdit.Status === "已处理" ? "待处理" : "已处理",
+                      Note: fbNote,
+                    },
+                    "PUT",
+                  );
+                  setFbEdit(null);
+                  await loadFeedbacks(fbStatus);
+                } catch (e) {
+                  report(e);
+                }
+              }}
+            >
+              <p style={{ marginTop: 0, color: "#888" }}>
+                {fbEdit ? fbEdit.Content : ""}
+              </p>
+              <Input.TextArea
+                rows={3}
+                maxLength={500}
+                value={fbNote}
+                onChange={(e) => setFbNote(e.target.value)}
+                placeholder="处理备注，选填"
+              />
+            </Modal>
+          </>
         )}
         {page === "会员订单" && (
           <Table
@@ -646,61 +976,21 @@ function Console(): React.JSX.Element {
         </Modal>
         <Modal
           open={!!entry}
-          title="动作资料"
+          title={entry?.ID ? "编辑动作资料" : "新增动作"}
           footer={null}
           onCancel={() => setEntry(null)}
           destroyOnClose
+          width={720}
         >
           {entry && (
-            <Form
-              initialValues={entry}
-              layout="vertical"
-              onFinish={async (v: Exercise) => {
-                try {
-                  await api("/exercises", { ...entry, ...v });
-                  await openPage("训练资料");
-                  setEntry(null);
-                } catch (e) {
-                  report(e);
-                }
+            <ExerciseForm
+              entry={entry}
+              meta={meta}
+              onDone={() => {
+                setEntry(null);
+                void openPage("训练资料").catch(report);
               }}
-            >
-              {(
-                [
-                  "Name",
-                  "Muscle",
-                  "Equipment",
-                  "Setup",
-                  "Guide",
-                  "AuxMuscles",
-                  "Mistakes",
-                  "ImageURL",
-                ] as const
-              ).map((k, n) => (
-                <Form.Item
-                  key={k}
-                  name={k}
-                  label={
-                    [
-                      "动作名称",
-                      "目标肌群",
-                      "器材",
-                      "器材调节",
-                      "动作步骤",
-                      "辅助肌群",
-                      "常见错误",
-                      "教学图 HTTPS 地址",
-                    ][n]
-                  }
-                  rules={[{ required: n < 5 }]}
-                >
-                  <Input />
-                </Form.Item>
-              ))}
-              <Button htmlType="submit" type="primary">
-                保存资料
-              </Button>
-            </Form>
+            />
           )}
         </Modal>
       </main>

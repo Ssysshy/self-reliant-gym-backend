@@ -29,7 +29,10 @@ func Run(db *gorm.DB) error {
 		}
 		for _, entry := range entries {
 			var count int64
-			if e := conn.Table("schema_versions").Where("name=?", entry.Name()).Count(&count).Error; e != nil {
+			// 每次查询用独立会话：conn 是连接池上固定的会话，直接链式调用会把
+			// Where 条件累加进去（name='001' AND name='002'），导致第二条起的
+			// 迁移永远被判定为未执行而重复执行。
+			if e := conn.Session(&gorm.Session{}).Table("schema_versions").Where("name=?", entry.Name()).Count(&count).Error; e != nil {
 				return e
 			}
 			if count > 0 {

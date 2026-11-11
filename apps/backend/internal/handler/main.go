@@ -43,14 +43,20 @@ type Plan struct {
 	Published   bool
 	Revision    uint
 }
+
+// Exercise 是动作库里的一条动作。Muscle 是左侧部位（胸/背/肩…），SubMuscle 是同部位内的细分
+// （上胸/中胸/下胸…，叶子部位留空），Category 是顶部筛选用的器材分类（器械/杠铃/哑铃…），
+// Equipment 才是具体器材名，套餐生成和训练计划按器材名匹配。
 type Exercise struct {
-	ID                              uint
-	Name                            string `gorm:"uniqueIndex"`
-	Muscle, Equipment, Guide, Setup string
-	AuxMuscles, ImageURL, Mistakes  string
+	ID                                     uint
+	Name                                   string `gorm:"uniqueIndex"`
+	Muscle, SubMuscle, Category, Equipment string
+	Guide, Setup                           string
+	AuxMuscles, ImageURL, Mistakes         string
 }
 type Session struct {
 	ID, Owner, PlanID uint
+	OperationID       *string    `json:"-"`
 	Day               Day        `gorm:"serializer:json;type:json"`
 	Done              []int      `gorm:"serializer:json;type:json"`
 	Weights           []*float64 `gorm:"serializer:json;type:json"`
@@ -114,28 +120,51 @@ func save(c *gin.Context, v any, e error) {
 	}
 	c.JSON(200, v)
 }
+
+// openid 用小程序 code 换取用户唯一标识。
+// 微信未返回 errcode 时只能看到一句「登录失败」，所以把 errcode 打进日志，便于区分凭证配错与 code 失效。
+// 本地开发（GYM_LOCAL=1）且未配置密钥时退化为固定测试账号，便于离线跑通完整流程。
+func openid(c *gin.Context, code string) (string, error) {
+	if os.Getenv("GYM_LOCAL") == "1" && os.Getenv("WX_SECRET") == "" {
+		if v := os.Getenv("WX_MOCK_OPENID"); v != "" {
+			return v, nil
+		}
+		return "local_dev_user", nil
+	}
+	q := url.Values{"appid": {os.Getenv("WX_APP_ID")}, "secret": {os.Getenv("WX_SECRET")}, "grant_type": {"authorization_code"}, "js_code": {code}}
+	client := http.Client{Timeout: 8 * time.Second}
+	req, _ := http.NewRequestWithContext(c.Request.Context(), "GET", "https://api.weixin.qq.com/sns/jscode2session?"+q.Encode(), nil)
+	res, e := client.Do(req)
+	if e != nil {
+		return "", errors.New("微信服务不可用")
+	}
+	defer res.Body.Close()
+	var w struct {
+		OpenID, ErrMsg string
+		ErrCode        int
+	}
+	if e = json.NewDecoder(res.Body).Decode(&w); e != nil {
+		return "", e
+	}
+	if w.OpenID == "" {
+		log.Printf("jscode2session 失败 errcode=%d errmsg=%q appid=%t secret=%t", w.ErrCode, w.ErrMsg, os.Getenv("WX_APP_ID") != "", os.Getenv("WX_SECRET") != "")
+		return "", errors.New("微信登录失败")
+	}
+	return w.OpenID, nil
+}
 func login(c *gin.Context) {
 	var in struct{ Code string }
 	if c.ShouldBindJSON(&in) != nil || in.Code == "" {
 		fail(c, 400, "缺少微信凭证")
 		return
 	}
-	q := url.Values{"appid": {os.Getenv("WX_APP_ID")}, "secret": {os.Getenv("WX_SECRET")}, "grant_type": {"authorization_code"}, "js_code": {in.Code}}
-	client := http.Client{Timeout: 8 * time.Second}
-	req, _ := http.NewRequestWithContext(c.Request.Context(), "GET", "https://api.weixin.qq.com/sns/jscode2session?"+q.Encode(), nil)
-	res, e := client.Do(req)
+	openID, e := openid(c, in.Code)
 	if e != nil {
-		fail(c, 502, "微信服务不可用")
+		fail(c, 401, e.Error())
 		return
 	}
-	defer res.Body.Close()
-	var w struct{ OpenID string }
-	if json.NewDecoder(res.Body).Decode(&w) != nil || w.OpenID == "" {
-		fail(c, 401, "微信登录失败")
-		return
-	}
-	u := User{OpenID: w.OpenID}
-	if db.Clauses(clause.OnConflict{DoNothing: true}).Create(&u).Error != nil || db.Where("open_id = ?", w.OpenID).First(&u).Error != nil {
+	u := User{OpenID: openID}
+	if db.Clauses(clause.OnConflict{DoNothing: true}).Create(&u).Error != nil || db.Where("open_id = ?", openID).First(&u).Error != nil {
 		fail(c, 500, "登录失败")
 		return
 	}
@@ -145,6 +174,13 @@ func Run() {
 	key = []byte(required("SESSION_SECRET"))
 	if len(key) < 32 {
 		log.Fatal("SESSION_SECRET 至少 32 字节")
+	}
+	if os.Getenv("WX_SECRET") == "" {
+		if os.Getenv("GYM_LOCAL") == "1" {
+			log.Println("未配置 WX_SECRET：微信登录改为固定测试账号 local_dev_user（WX_MOCK_OPENID 可覆盖）")
+		} else {
+			log.Println("未配置 WX_SECRET：微信登录将不可用")
+		}
 	}
 	admin := required("ADMIN_ACCOUNT")
 	password := required("ADMIN_PASSWORD")
@@ -161,7 +197,7 @@ func Run() {
 	r.Use(gin.Recovery())
 	api := r.Group("/api/v1")
 	api.POST("/auth/wechat", login)
-	api.GET("/exercises", func(c *gin.Context) { var rows []Exercise; e := db.Order("id").Find(&rows).Error; save(c, rows, e) })
+	registerCatalog(api)
 	u := api.Group("", auth("user"))
 	u.GET("/me", func(c *gin.Context) { var v User; e := db.First(&v, uid(c)).Error; save(c, v, e) })
 	u.PUT("/experience", func(c *gin.Context) {
@@ -197,6 +233,10 @@ func Run() {
 	staffGrants(a)
 	registerAdmin(a)
 	go watchOrders()
-	srv := http.Server{Addr: ":18080", Handler: r, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, BaseContext: nil}
+	addr := os.Getenv("LISTEN_ADDR")
+	if addr == "" {
+		addr = ":18080"
+	}
+	srv := http.Server{Addr: addr, Handler: r, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, BaseContext: nil}
 	log.Fatal(srv.ListenAndServe())
 }

@@ -8,6 +8,10 @@ import (
 type Feedback struct {
 	ID, Owner uint
 	Content   string `gorm:"size:1000"`
+	Status    string `gorm:"size:16"`
+	HandledBy *string
+	Note      *string `gorm:"size:500"`
+	HandledAt *time.Time
 	CreatedAt time.Time
 }
 
@@ -18,7 +22,7 @@ func accountRoutes(g *gin.RouterGroup) {
 			fail(c, 400, "反馈须为 1 至 1000 字")
 			return
 		}
-		save(c, true, db.Create(&Feedback{Owner: uid(c), Content: in.Content}).Error)
+		save(c, true, db.Create(&Feedback{Owner: uid(c), Content: in.Content, Status: "待处理"}).Error)
 	})
 	g.GET("/training/summary", func(c *gin.Context) {
 		var out struct{ Total, Month int64 }
