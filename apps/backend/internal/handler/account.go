@@ -13,6 +13,8 @@ type Feedback struct {
 	Note      *string `gorm:"size:500"`
 	HandledAt *time.Time
 	CreatedAt time.Time
+	// OwnerCode 是 Owner 的对外编号（见 code.go），后台列表直接展示，不落库
+	OwnerCode string `gorm:"-"`
 }
 
 func accountRoutes(g *gin.RouterGroup) {

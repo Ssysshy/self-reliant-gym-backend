@@ -24,6 +24,10 @@ type User struct {
 	Experience string
 	Active     uint
 	Expires    time.Time `gorm:"type:datetime;default:null"`
+	// Code 是落库的用户编号（见 code.go）：注册时写入，存量用户在启动时回填
+	Code string
+	// PlanLimit 是当前会员状态能保存的计划份数，不落库，读接口按 Expires 现算（见 planLimit）
+	PlanLimit int `gorm:"-" json:"PlanLimit"`
 }
 type Item struct {
 	Name             string
@@ -34,12 +38,31 @@ type Day struct {
 	Focus   string
 	Items   []Item
 }
+
+// PlanMeta 是模板的展示信息，只有官方模板（owner=0）会填；用户自己存的计划这一列为 NULL。
+// Cover 存小程序包内路径（/assets/...）或 https 链接，两处都能直接用 <image src> 渲染。
+type PlanMeta struct {
+	Cover   string  `json:"Cover"`
+	Level   string  `json:"Level"`
+	Minutes int     `json:"Minutes"`
+	Kcal    int     `json:"Kcal"`
+	Blocks  []Block `json:"Blocks"`
+}
+
+// Block 是详情页里一段带小标题的内容：Text 是整段话，Lines 是要点列表（①②③ 由前端加序号）。
+type Block struct {
+	Title string   `json:"Title"`
+	Text  string   `json:"Text,omitempty"`
+	Lines []string `json:"Lines,omitempty"`
+}
+
 type Plan struct {
 	OperationID *string `json:"-"`
 	ID          uint
 	Owner       uint `gorm:"index"`
 	Name        string
-	Days        []Day `gorm:"serializer:json;type:json"`
+	Days        []Day     `gorm:"serializer:json;type:json"`
+	Meta        *PlanMeta `gorm:"serializer:json;type:json"`
 	Published   bool
 	Revision    uint
 }
@@ -163,11 +186,14 @@ func login(c *gin.Context) {
 		fail(c, 401, e.Error())
 		return
 	}
+	// 只插 open_id：编号要等自增 ID 出来才能算，插完再补，否则空串会在唯一索引上撞车
 	u := User{OpenID: openID}
-	if db.Clauses(clause.OnConflict{DoNothing: true}).Create(&u).Error != nil || db.Where("open_id = ?", openID).First(&u).Error != nil {
+	if db.Select("OpenID").Clauses(clause.OnConflict{DoNothing: true}).Create(&u).Error != nil || db.Where("open_id = ?", openID).First(&u).Error != nil {
 		fail(c, 500, "登录失败")
 		return
 	}
+	codeOf(&u)
+	u.PlanLimit = planLimit(u)
 	c.JSON(200, gin.H{"token": token(u.ID, "user"), "user": u})
 }
 func Run() {
@@ -193,13 +219,25 @@ func Run() {
 		log.Fatal(e)
 	}
 	seed()
+	// 迁移只给 users 加了 code 列，老用户的编号在这里补
+	ensureCodes()
 	r := gin.New()
 	r.Use(gin.Recovery())
 	api := r.Group("/api/v1")
 	api.POST("/auth/wechat", login)
 	registerCatalog(api)
 	u := api.Group("", auth("user"))
-	u.GET("/me", func(c *gin.Context) { var v User; e := db.First(&v, uid(c)).Error; save(c, v, e) })
+	// 编号落库后由 codeOf 兜底自愈，正常读出来就是现成的
+	u.GET("/me", func(c *gin.Context) {
+		var v User
+		if e := db.First(&v, uid(c)).Error; e != nil {
+			save(c, v, e)
+			return
+		}
+		codeOf(&v)
+		v.PlanLimit = planLimit(v)
+		save(c, v, nil)
+	})
 	u.PUT("/experience", func(c *gin.Context) {
 		var v struct{ Experience string }
 		if c.ShouldBindJSON(&v) != nil || (v.Experience != "小白" && v.Experience != "训练老炮") {

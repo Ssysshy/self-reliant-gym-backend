@@ -42,6 +42,10 @@ func staffGrants(g *gin.RouterGroup) {
 		save(c, rows, e)
 	})
 	g.POST("/members/:id/grants/:grant/revoke", func(c *gin.Context) {
+		if !c.GetBool("admin") {
+			fail(c, 403, "需要管理员权限")
+			return
+		}
 		var input struct{ Reason string }
 		if c.ShouldBindJSON(&input) != nil || input.Reason == "" {
 			fail(c, 400, "请输入撤销原因")

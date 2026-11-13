@@ -12,11 +12,11 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -56,10 +56,11 @@ func purchase(c *gin.Context) {
 		return
 	}
 	price := sku.Price
-	product := os.Getenv("XPAY_PRODUCT_" + strconv.Itoa(in.Days))
+	// 商品 ID 优先取档位里维护的那一列，没填才回落环境变量（存量三档就是这种情况）
+	product := xpayID(sku)
 	offer := os.Getenv("XPAY_OFFER")
 	appKey := os.Getenv("XPAY_KEY")
-	if price == 0 || product == "" || offer == "" || appKey == "" || os.Getenv("WX_PUSH_TOKEN") == "" || os.Getenv("WX_PUSH_AES") == "" {
+	if !ready(sku) || offer == "" || appKey == "" {
 		fail(c, 503, "该套餐尚未开放购买")
 		return
 	}
@@ -231,6 +232,11 @@ func refund(data []byte) error {
 		}
 		u, err := locked(tx, o.Owner)
 		if err != nil {
+			// 账号已注销：订单 owner 被脱敏成 0，权益也随账号删了，没法再校验 openid。
+			// 这里只把订单记成已退款，否则渠道回调会一直重试、日志刷不停。
+			if o.Owner == 0 && errors.Is(err, gorm.ErrRecordNotFound) {
+				return tx.Model(&o).Updates(map[string]any{"status": "已退款", "refund_id": event.WxRefundId}).Error
+			}
 			return err
 		}
 		if u.OpenID != event.OpenId || o.Price != event.RefundFee {

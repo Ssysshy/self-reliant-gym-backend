@@ -2,6 +2,7 @@ package handler
 
 import (
 	"errors"
+	"fmt"
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -12,6 +13,36 @@ import (
 )
 
 var conflict = errors.New("数据已更新，请刷新")
+
+// 档位（会员套餐）的两种业务拒绝：天数重复、参数不合法。
+// 校验发生在事务里（要读当前行再合并参数），不能直接写响应，所以包成 error 交给 result 翻译。
+var dupTier = errors.New("该天数已有档位，换一个天数")
+
+type invalidArg string
+
+func (e invalidArg) Error() string { return string(e) }
+
+func invalid(msg string) error { return invalidArg(msg) }
+
+// 计划保存份数上限：免费 1 份、会员 6 份。上限只拦「新建」，改已有计划不计数，
+// 所以会员到期后手上超过 1 份也还能继续改和删，只是暂时不能再加新的。
+const (
+	FreePlanLimit   = 1
+	MemberPlanLimit = 6
+)
+
+var (
+	freeLimit   = errors.New("免费版只能保存 1 份计划，开通会员可保存 6 份")
+	memberLimit = errors.New("会员最多保存 6 份计划，删掉一份再新建")
+)
+
+// planLimit 按会员状态算当前能保存的份数，读 /me 与新建计划都以它为准。
+func planLimit(u User) int {
+	if u.Expires.After(time.Now()) {
+		return MemberPlanLimit
+	}
+	return FreePlanLimit
+}
 
 // seed 首次启动写入示范动作与模板。ID 1-8 被下面的示范模板引用，顺序不要动；
 // 新动作按部位分组追加在后面，重复执行时靠唯一索引与主键跳过。
@@ -84,20 +115,155 @@ func seed() {
 			Exercise{ID: 50, Name: "跑步机快走", Muscle: "有氧", SubMuscle: "", Category: "器械", Equipment: "跑步机", Guide: "保持能说话但略喘的强度，全程匀速。", Setup: "先慢速热身，坡度从 0 开始。"},
 			Exercise{ID: 51, Name: "划船机间歇", Muscle: "有氧", SubMuscle: "", Category: "器械", Equipment: "划船机", Guide: "腿、背、手依次发力，回程顺序相反。", Setup: "调节脚踏绑带，确认阻力档位。"},
 			Exercise{ID: 52, Name: "动感单车冲刺", Muscle: "有氧", SubMuscle: "", Category: "器械", Equipment: "动感单车", Guide: "冲刺段提高踏频，恢复段降低阻力。", Setup: "调好座椅高度，膝盖微屈即可。"})
+		// 官方模板用到的动作（三/四分化里的自由重量与单侧动作），基础库里没有，一起补上。
+		// ID 从 54 起：早期的存量数据里 53 已被占用，这里往后排，避免和已有行撞车。
+		rows = append(rows,
+			Exercise{ID: 54, Name: "Y字侧平举", Muscle: "肩", SubMuscle: "中束", Category: "哑铃", Equipment: "哑铃", Guide: "手肘微屈并外旋，沿Y字斜上方抬至与肩平，顶端停一秒，靠中束发力不耸肩。", Setup: "选轻哑铃，站姿，双臂自然下垂。"},
+			Exercise{ID: 55, Name: "单臂钢线下拉", Muscle: "背", SubMuscle: "背阔肌", Category: "绳索", Equipment: "龙门架", Guide: "单手正握把手，肘部贴身下压至腰侧，回放时充分拉伸背阔肌下缘。", Setup: "滑轮调到高位，侧身站位，另一手扶机架。"},
+			Exercise{ID: 56, Name: "对握高位下拉", Muscle: "背", SubMuscle: "背阔肌", Category: "器械", Equipment: "高位下拉机", Guide: "掌心相对握把，肩胛先下沉再拉，把横杆拉至上胸，不后仰借力。", Setup: "装对握把手，调腿垫固定大腿。"},
+			Exercise{ID: 57, Name: "单臂器械划船", Muscle: "背", SubMuscle: "中背", Category: "器械", Equipment: "划船机", Guide: "单臂拉把手至腹侧，肩胛后缩带动，躯干保持中立不旋转。", Setup: "坐稳压住胸垫，单侧手握住把手。"},
+			Exercise{ID: 58, Name: "坐姿开肘划船", Muscle: "背", SubMuscle: "中背", Category: "绳索", Equipment: "龙门架", Guide: "肘部向两侧打开至与肩同高，靠肩胛后缩发力，不靠躯干摆动。", Setup: "低位绳索配双头绳，坐姿双脚蹬实。"},
+			Exercise{ID: 59, Name: "单腿硬拉", Muscle: "腿", SubMuscle: "腘绳肌", Category: "哑铃", Equipment: "哑铃", Guide: "髋部后移、上身前倾下放至小腿中段，全程骨盆稳定，靠臀腿拉回。", Setup: "单腿站立，另一腿后伸，双手持一对哑铃。"},
+			Exercise{ID: 60, Name: "保加利亚分腿蹲", Muscle: "腿", SubMuscle: "股四头", Category: "哑铃", Equipment: "哑铃", Guide: "后脚搭凳，前腿屈膝下蹲至大腿接近水平，膝盖对准脚尖方向。", Setup: "训练凳置于身后约一步，双手持哑铃。"},
+			Exercise{ID: 61, Name: "杠铃颈前深蹲", Muscle: "腿", SubMuscle: "股四头", Category: "杠铃", Equipment: "杠铃", Guide: "杠铃架在锁骨前侧，躯干保持直立下蹲，肘部高抬防止前倾。", Setup: "深蹲架调到肩高，用颈前架杠姿势起杠。"},
+			Exercise{ID: 62, Name: "罗马尼亚硬拉", Muscle: "腿", SubMuscle: "腘绳肌", Category: "杠铃", Equipment: "杠铃", Guide: "膝微屈固定，杠铃贴腿下滑至小腿中段，靠臀部后移拉回。", Setup: "站距与髋同宽，正握杠铃置于大腿前。"},
+			Exercise{ID: 63, Name: "山羊挺身", Muscle: "背", SubMuscle: "下背", Category: "器械", Equipment: "罗马椅", Guide: "上身前屈下放，靠臀与竖脊肌发力回到与腿成一条线，不超伸。", Setup: "罗马椅调至髋部可自由折叠，脚踝固定。"},
+			Exercise{ID: 64, Name: "史密斯卧推", Muscle: "胸", SubMuscle: "中胸", Category: "史密斯", Equipment: "史密斯机", Guide: "落到胸部中段后推起，轨迹固定，全程肩胛收紧。", Setup: "卧推凳置于史密斯机中间，调好挂钩高度。"},
+			Exercise{ID: 65, Name: "器械下斜卧推", Muscle: "胸", SubMuscle: "下胸", Category: "器械", Equipment: "下斜卧推机", Guide: "握把推到肘接近伸直，靠胸肌下缘发力，回放控制到舒适位。", Setup: "调整座椅使握把与下胸齐平。"},
+			Exercise{ID: 66, Name: "站姿直臂下压", Muscle: "背", SubMuscle: "背阔肌", Category: "绳索", Equipment: "龙门架", Guide: "手臂伸直下压至大腿前，靠背阔肌带动，躯干不前后晃。", Setup: "高位绳索配直杆，站距与髋同宽。"},
+			Exercise{ID: 67, Name: "坐姿反向飞鸟", Muscle: "肩", SubMuscle: "后束", Category: "器械", Equipment: "反向飞鸟机", Guide: "手肘微抬向两侧打开，意念是向外延伸，回放不触底保持张力。", Setup: "调整座椅使把手与肩齐平，胸口贴紧靠垫。"},
+			Exercise{ID: 68, Name: "史密斯推肩", Muscle: "肩", SubMuscle: "前束", Category: "史密斯", Equipment: "史密斯机", Guide: "杠铃推至头顶上方，肘部略前于身体，下放至下巴高度。", Setup: "调好座椅高度，坐下后杠铃在下巴位置。"},
+			Exercise{ID: 69, Name: "哑铃前平举", Muscle: "肩", SubMuscle: "前束", Category: "哑铃", Equipment: "哑铃", Guide: "对握举至与肩同高，下放不甩不借力，保持挺胸。", Setup: "站姿双手对握哑铃置于体前。"},
+			Exercise{ID: 70, Name: "上斜杠铃臂屈伸", Muscle: "三头", SubMuscle: "", Category: "杠铃", Equipment: "杠铃", Guide: "躺上斜凳，杠铃下放至额头上方，肘部固定不外张，靠三头伸直。", Setup: "上斜凳调至45度，窄握杠铃举过头顶。"},
+			Exercise{ID: 71, Name: "蹲姿二头弯举", Muscle: "二头", SubMuscle: "", Category: "哑铃", Equipment: "哑铃", Guide: "蹲姿固定躯干，肘部贴大腿内侧屈肘弯举，顶端挤压一秒。", Setup: "深蹲位，一手扶膝，另一手持哑铃。"},
+			Exercise{ID: 72, Name: "坐姿内收", Muscle: "臀部", SubMuscle: "", Category: "器械", Equipment: "内收机", Guide: "双腿由外向内夹紧，顶端停顿一秒，控制回放不猛松。", Setup: "坐稳内收机，调好挡板起始角度。"},
+			Exercise{ID: 73, Name: "哑铃弓步蹲", Muscle: "腿", SubMuscle: "股四头", Category: "哑铃", Equipment: "哑铃", Guide: "前腿屈膝下蹲至大腿接近水平，后膝接近地面，躯干保持直立。", Setup: "双手持哑铃垂于体侧，站距与髋同宽。"},
+			Exercise{ID: 74, Name: "杠铃提踵", Muscle: "小腿", SubMuscle: "", Category: "杠铃", Equipment: "杠铃", Guide: "前脚掌踩实，提踵到最高点停顿一秒，下放到小腿充分拉长。", Setup: "杠铃置于斜方肌上，前脚掌踩在杠片或台阶边缘。"})
 		if e := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows).Error; e != nil {
 			return e
 		}
-		day := func(w int, focus string, ids ...int) Day {
-			d := Day{Weekday: w, Focus: focus}
-			for _, id := range ids {
-				d.Items = append(d.Items, Item{rows[id-1].Name, 3, 10, 60})
-			}
-			return d
+		// 官方模板固定 ID 11/12，和已经上线的存量数据对齐（早期的 1~3 已下线，不再种回来，
+		// 否则老库重启一次就会把删掉的模板重新插进去）。
+		// 详情页文案放在 Meta.Blocks 里按顺序渲染；训练安排由 Days 自动生成，不另写一份。
+		at := func(w int, focus string, items []Item) Day {
+			// 同一份动作清单会被周内两个训练日复用，拷一份，免得两边共享底层数组
+			return Day{Weekday: w, Focus: focus, Items: append([]Item(nil), items...)}
+		}
+		push := []Item{
+			{"杠铃平板卧推", 4, 10, 90},
+			{"上斜哑铃卧推", 4, 12, 90},
+			{"双杠臂屈伸", 4, 12, 90},
+			{"哑铃颈后臂屈伸", 4, 15, 60},
+			{"Y字侧平举", 3, 20, 60},
+		}
+		pull := []Item{
+			{"单臂钢线下拉", 4, 12, 90},
+			{"对握高位下拉", 4, 10, 90},
+			{"单臂器械划船", 4, 10, 90},
+			{"坐姿开肘划船", 4, 12, 90},
+			{"绳索弯举", 3, 12, 60},
+		}
+		legs := []Item{
+			{"单腿硬拉", 4, 12, 90},
+			{"保加利亚分腿蹲", 4, 10, 90},
+			{"杠铃颈前深蹲", 3, 15, 90},
+			{"罗马尼亚硬拉", 4, 12, 90},
+			{"山羊挺身", 3, 8, 60},
+		}
+		chest := []Item{
+			{"史密斯卧推", 4, 12, 90},
+			{"器械上斜卧推（挂片器械）", 4, 12, 90},
+			{"坐姿蝴蝶机夹胸", 4, 12, 60},
+			{"器械下斜卧推", 4, 12, 90},
+			{"杠铃颈前推举", 4, 12, 90},
+			{"哑铃颈后臂屈伸", 4, 12, 60},
+		}
+		back := []Item{
+			{"站姿直臂下压", 4, 12, 60},
+			{"坐姿划船", 4, 12, 90},
+			{"高位下拉", 4, 12, 90},
+			{"引体向上", 4, 12, 90},
+			{"杠铃弯举", 4, 12, 60},
+		}
+		shoulder := []Item{
+			{"坐姿反向飞鸟", 4, 12, 60},
+			{"史密斯推肩", 4, 12, 90},
+			{"哑铃前平举", 4, 12, 60},
+			{"Y字侧平举", 4, 12, 60},
+			{"上斜杠铃臂屈伸", 4, 12, 60},
+			{"蹲姿二头弯举", 4, 12, 60},
+		}
+		lower := []Item{
+			{"坐姿内收", 4, 12, 60},
+			{"哑铃弓步蹲", 4, 12, 90},
+			{"单腿硬拉", 4, 12, 90},
+			{"杠铃提踵", 4, 12, 60},
+			{"悬垂举腿", 4, 12, 60},
+			{"绳索卷腹", 4, 12, 60},
+			{"卷腹", 4, 12, 60},
 		}
 		for _, p := range []Plan{
-			{ID: 1, Name: "全身入门", Days: []Day{day(2, "全身", 4, 1, 2), day(5, "全身", 3, 5, 6)}, Published: true, Revision: 1},
-			{ID: 2, Name: "上肢／下肢／全身", Days: []Day{day(1, "上肢", 1, 2), day(3, "下肢", 3, 7), day(6, "全身", 4, 5, 1)}, Published: true, Revision: 1},
-			{ID: 3, Name: "上下肢交替", Days: []Day{day(1, "上肢", 1, 2), day(2, "下肢", 3, 7), day(4, "上肢", 5, 6), day(6, "下肢", 4, 8)}, Published: true, Revision: 1},
+			{
+				ID: 11, Name: "谭成义&凯圣王三分化", Published: true, Revision: 1,
+				Meta: &PlanMeta{
+					Cover:   "/assets/plans/tan-3split.jpg",
+					Level:   "中级",
+					Minutes: 35,
+					Blocks: []Block{
+						{Title: "计划介绍", Text: "凯圣王 × 谭成义联名的推拉腿三分化：按发力模式把身体拆成推、拉、腿三个单元，练 3 天休 1 天，一周走完两轮循环，让每个部位每周被刺激两次。"},
+						{Title: "计划结构", Lines: []string{
+							"① 推日 · 胸 / 三角肌中束 / 肱三头（推类核心）",
+							"② 拉日 · 背 / 三角肌后束 / 肱二头（拉类核心）",
+							"③ 腿日 · 臀 / 股四 / 腘绳（后侧链主导）",
+						}},
+						{Title: "核心理念", Text: "以杠铃卧推这类自由重量筛查并开发身体稳定性与协调性，而不是只靠器械堆容量。推日不再单独加推肩——卧推、上斜与双杠已经把前束喂饱，只补一个 Y 字侧平举专攻中束。"},
+						{Title: "主项线性渐进", Lines: []string{
+							"卧推 15 → 12 → 10 → 8 → 6 次，正式组 RPE8，留约 2 次余量",
+							"提高强度时先减组再加组：2 组 × 6 → 3 组 × 6 → 4 组 × 6",
+							"复合动作不力竭，孤立动作可以做到力竭",
+							"每次训练只动一个变量：要么加重量，要么加组数",
+						}},
+					},
+				},
+				Days: []Day{
+					at(1, "推日 · 胸/肩中束/三头", push),
+					at(2, "拉日 · 背/肩后束/二头", pull),
+					at(3, "腿日 · 臀/后侧链/核心", legs),
+					at(5, "推日 · 胸/肩中束/三头", push),
+					at(6, "拉日 · 背/肩后束/二头", pull),
+					at(7, "腿日 · 臀/后侧链/核心", legs),
+				},
+			},
+			{
+				ID: 12, Name: "谭成义四分化", Published: true, Revision: 1,
+				Meta: &PlanMeta{
+					Cover:   "/assets/plans/tan-4split.jpg",
+					Level:   "入门",
+					Minutes: 41,
+					Blocks: []Block{
+						{Title: "计划介绍", Text: "谭成义的新手友好型四分化：一周练 4 天，按胸加三头、背加二头、肩加手臂、臀腿加腹拆成四份，其余时间留给恢复，节奏更适合上班族。"},
+						{Title: "计划结构", Lines: []string{
+							"① 胸 + 肱三头",
+							"② 背 + 肱二头",
+							"③ 肩 + 手臂",
+							"④ 臀腿 + 腹",
+						}},
+						{Title: "核心理念", Text: "先把动作质量、力线与肩胛控制做对，再谈重量。每个动作统一 4 组 × 12 次，不堆花哨动作，把基础动作重复到标准为止。"},
+						{Title: "执行要点", Lines: []string{
+							"大重量复合动作留余力，动作一变形就停",
+							"小重量孤立动作可以练到接近力竭",
+							"同一个部位之间至少留 48 小时恢复",
+							"先把基础动作练两个月，别急着换计划",
+						}},
+					},
+				},
+				Days: []Day{
+					at(1, "胸 + 三头", chest),
+					at(2, "背 + 二头", back),
+					at(4, "肩 + 手臂", shoulder),
+					at(5, "臀腿 + 腹", lower),
+				},
+			},
 		} {
 			if e := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&p).Error; e != nil {
 				return e
@@ -137,6 +303,21 @@ func result(c *gin.Context, v any, e error) {
 		fail(c, 409, e.Error())
 		return
 	}
+	// 计划份数到顶属于「说得清的业务拒绝」：403 + 直出文案，前端 report 会原样弹出来
+	if errors.Is(e, freeLimit) || errors.Is(e, memberLimit) {
+		fail(c, 403, e.Error())
+		return
+	}
+	// 档位编辑：参数不合法是 400，天数撞车是 409
+	var bad invalidArg
+	if errors.As(e, &bad) {
+		fail(c, 400, bad.Error())
+		return
+	}
+	if errors.Is(e, dupTier) {
+		fail(c, 409, e.Error())
+		return
+	}
 	save(c, v, e)
 }
 func registerPlans(g *gin.RouterGroup) {
@@ -154,7 +335,9 @@ func registerPlans(g *gin.RouterGroup) {
 		var in struct {
 			Operation                  string
 			Template, Revision, Active uint
-			Custom                     Plan
+			// ID 非 0 表示「改已有计划」：原地更新那一条，不再另存一份
+			ID     uint
+			Custom Plan
 		}
 		if c.ShouldBindJSON(&in) != nil {
 			fail(c, 400, "方案无效")
@@ -173,6 +356,27 @@ func registerPlans(g *gin.RouterGroup) {
 			if len(in.Operation) > 72 || len(in.Operation) < 8 {
 				return conflict
 			}
+			// 改已有计划：只覆盖名称和训练日，owner/operation_id 保持不动。
+			// 更新本身幂等，不用像新建那样按 Operation 查重放记录（那条重放要在
+			// Active 校验之前，否则重试会被误判成 409）。
+			if in.ID != 0 {
+				if u.Active != in.Active {
+					return conflict
+				}
+				var cur Plan
+				if e := tx.Where("owner=? AND id=?", u.ID, in.ID).First(&cur).Error; e != nil {
+					if errors.Is(e, gorm.ErrRecordNotFound) {
+						return conflict
+					}
+					return e
+				}
+				cur.Name, cur.Days, cur.Published = p.Name, p.Days, false
+				if e := tx.Save(&cur).Error; e != nil {
+					return e
+				}
+				p = cur
+				return tx.Model(&u).Update("active", cur.ID).Error
+			}
 			var previous Plan
 			err := tx.Where("owner=? AND operation_id=?", u.ID, in.Operation).First(&previous).Error
 			if err == nil {
@@ -185,6 +389,18 @@ func registerPlans(g *gin.RouterGroup) {
 			if u.Active != in.Active {
 				return conflict
 			}
+			// 份数上限：必须放在 Operation 重放查询之后 —— 同一次提交重试时应当返回已建好的那份，
+			// 而不是被自己的上限挡住。这里只数 owner=自己的计划，官方模板（owner=0）不计入。
+			var count int64
+			if e := tx.Model(&Plan{}).Where("owner=?", u.ID).Count(&count).Error; e != nil {
+				return e
+			}
+			if limit := planLimit(u); count >= int64(limit) {
+				if limit == FreePlanLimit {
+					return freeLimit
+				}
+				return memberLimit
+			}
 			if in.Template != 0 {
 				if e := tx.Where("owner=0 AND published=true AND revision=?", in.Revision).First(&p, in.Template).Error; e != nil {
 					return e
@@ -194,12 +410,54 @@ func registerPlans(g *gin.RouterGroup) {
 			p.OperationID = &in.Operation
 			p.Owner = u.ID
 			p.Published = false
+			// 模板的封面与介绍文案不跟着复制：用户拿到的是可改的计划，留着那份推广文案反而会误导
+			p.Meta = nil
 			if e := tx.Create(&p).Error; e != nil {
 				return e
 			}
 			return tx.Model(&u).Update("active", p.ID).Error
 		})
 		result(c, p, e)
+	})
+	// 删整份计划（连同它的训练日一起）。删的是当前计划时，当前位顶到剩下最新的一份；
+	// 一份都不剩就置 0，前端据此回到「还没有计划」的引导态。历史训练记录是当时的 Day
+	// 快照，不跟着删。返回 Active 让客户端不必再查一次 /me。
+	g.DELETE("/plans/:id", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		active := uint(0)
+		e := db.Transaction(func(tx *gorm.DB) error {
+			u, e := locked(tx, uid(c))
+			if e != nil {
+				return e
+			}
+			var p Plan
+			if e := tx.Where("owner=? AND id=?", u.ID, id).First(&p).Error; e != nil {
+				return e
+			}
+			if e := tx.Delete(&Plan{}, p.ID).Error; e != nil {
+				return e
+			}
+			active = u.Active
+			if u.Active != p.ID {
+				return nil
+			}
+			var next Plan
+			err := tx.Where("owner=?", u.ID).Order("id desc").First(&next).Error
+			if err == nil {
+				active = next.ID
+			} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+				return err
+			}
+			if e := tx.Model(&u).Update("active", active).Error; e != nil {
+				return e
+			}
+			return nil
+		})
+		if e != nil {
+			save(c, nil, e)
+			return
+		}
+		save(c, gin.H{"Active": active}, nil)
 	})
 }
 
@@ -327,7 +585,8 @@ func registerAdmin(g *gin.RouterGroup) {
 	g.GET("/exercises", exerciseList)
 	// 部位与器材分类的约定顺序：后台下拉和小程序侧边栏共用一份，避免两边手工对齐。
 	g.GET("/categories", categories)
-	// 用户反馈：后台按时间倒序看最新 200 条，可按状态、用户编号或内容关键词筛
+	// 用户反馈：后台按时间倒序看最新 200 条，可按状态、用户编号或内容关键词筛。
+	// 用户报上来的是编号（U3M8Q2K），后台旧习惯的纯数字 ID 也照旧能搜。
 	g.GET("/feedbacks", func(c *gin.Context) {
 		var rows []Feedback
 		q := db.Order("id desc").Limit(200)
@@ -335,12 +594,27 @@ func registerAdmin(g *gin.RouterGroup) {
 			q = q.Where("status=?", st)
 		}
 		if owner := strings.TrimSpace(c.Query("owner")); owner != "" {
-			q = q.Where("owner=?", owner)
+			id, ok := ownerID(owner)
+			if !ok {
+				// 编号查不到人就当作没这个人：返回空列表，比 400 更贴近「没搜到」
+				save(c, []Feedback{}, nil)
+				return
+			}
+			q = q.Where("owner=?", id)
 		}
 		if kw := strings.TrimSpace(c.Query("q")); kw != "" {
 			q = q.Where("content LIKE ?", "%"+kw+"%")
 		}
-		save(c, rows, q.Find(&rows).Error)
+		e := q.Find(&rows).Error
+		owners := make([]uint, 0, len(rows))
+		for _, r := range rows {
+			owners = append(owners, r.Owner)
+		}
+		codes := codesOf(owners)
+		for i := range rows {
+			rows[i].OwnerCode = codes[rows[i].Owner]
+		}
+		save(c, rows, e)
 	})
 	// 标记处理状态：已处理时记处理人与时间，退回待处理时清空
 	g.PUT("/feedbacks/:id", func(c *gin.Context) {
@@ -404,16 +678,25 @@ func registerAdmin(g *gin.RouterGroup) {
 		}
 		save(c, x, db.Save(&x).Error)
 	})
+	// 会员列表：支持按用户编号（U3M8Q2K）或纯数字 ID 查人，客服照着用户报的编号就能找到
 	g.GET("/members", func(c *gin.Context) {
 		var rows []User
 		q := db.Order("id desc").Limit(100)
-		if id := c.Query("id"); id != "" {
+		if owner := strings.TrimSpace(c.Query("id")); owner != "" {
+			id, ok := ownerID(owner)
+			if !ok {
+				save(c, []User{}, nil)
+				return
+			}
 			q = q.Where("id=?", id)
 		}
-		e := q.Find(&rows).Error
-		save(c, rows, e)
+		save(c, rows, q.Find(&rows).Error)
 	})
 	g.POST("/members/:id/grants", func(c *gin.Context) {
+		if !c.GetBool("admin") {
+			fail(c, 403, "需要管理员权限")
+			return
+		}
 		var in struct {
 			Days     int
 			Reason   string
@@ -441,5 +724,74 @@ func registerAdmin(g *gin.RouterGroup) {
 			return tx.Model(&u).Update("expires", base.AddDate(0, 0, in.Days)).Error
 		})
 		result(c, true, e)
+	})
+	// 注销账号：把这个人彻底删掉 —— 计划、训练记录、反馈、人工权益流水和账号行一起删。
+	// 已支付/已退款的订单不删：交易要留档，但把 owner 置 0 脱敏，从此对不上具体的人；
+	// 退款回调也是靠 owner 找用户，所以 refund 里对 owner=0 单独处理。
+	// 还有「待支付」订单时直接拒绝：那一刻钱可能刚付出去、回调还没到，删了就对不上账。
+	g.DELETE("/members/:id", func(c *gin.Context) {
+		if !c.GetBool("admin") {
+			fail(c, 403, "需要管理员权限")
+			return
+		}
+		id, e := strconv.ParseUint(c.Param("id"), 10, 32)
+		if e != nil {
+			fail(c, 400, "账号无效")
+			return
+		}
+		// 要求照着用户编号再输一遍：注销不可恢复，只靠点一次确认太容易误操作
+		var in struct{ Code string }
+		if c.ShouldBindJSON(&in) != nil || strings.TrimSpace(in.Code) == "" {
+			fail(c, 400, "请输入用户编号确认")
+			return
+		}
+		var count struct{ Plans, Sessions, Feedbacks, Grants, Orders int64 }
+		e = db.Transaction(func(tx *gorm.DB) error {
+			var u User
+			if e := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&u, "id=?", id).Error; e != nil {
+				return e
+			}
+			if !strings.EqualFold(strings.TrimSpace(in.Code), u.Code) {
+				return invalid("用户编号不匹配，未执行注销")
+			}
+			var pending int64
+			if e := tx.Model(&Order{}).Where("owner=? AND status=?", u.ID, "待支付").Count(&pending).Error; e != nil {
+				return e
+			}
+			if pending > 0 {
+				return invalid("该账号还有未完成的订单，等支付结果确认后再注销")
+			}
+			plans := tx.Where("owner=?", u.ID).Delete(&Plan{})
+			if plans.Error != nil {
+				return plans.Error
+			}
+			sessions := tx.Where("owner=?", u.ID).Delete(&Session{})
+			if sessions.Error != nil {
+				return sessions.Error
+			}
+			feedbacks := tx.Where("owner=?", u.ID).Delete(&Feedback{})
+			if feedbacks.Error != nil {
+				return feedbacks.Error
+			}
+			grants := tx.Where("user_id=?", u.ID).Delete(&Grant{})
+			if grants.Error != nil {
+				return grants.Error
+			}
+			count.Plans, count.Sessions = plans.RowsAffected, sessions.RowsAffected
+			count.Feedbacks, count.Grants = feedbacks.RowsAffected, grants.RowsAffected
+			// 订单脱敏：owner 置 0，其余字段（金额、天数、支付状态、渠道单号）留着对账
+			res := tx.Model(&Order{}).Where("owner=?", u.ID).Update("owner", 0)
+			if res.Error != nil {
+				return res.Error
+			}
+			count.Orders = res.RowsAffected
+			if e := tx.Delete(&User{}, u.ID).Error; e != nil {
+				return e
+			}
+			action := fmt.Sprintf("注销账号 %s：计划 %d、训练记录 %d、反馈 %d、权益流水 %d、订单 %d 笔脱敏保留",
+				u.Code, count.Plans, count.Sessions, count.Feedbacks, count.Grants, count.Orders)
+			return tx.Create(&Audit{Actor: c.GetString("actor"), Action: action, Target: u.ID}).Error
+		})
+		result(c, count, e)
 	})
 }

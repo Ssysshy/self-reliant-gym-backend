@@ -17,9 +17,17 @@ bin-release/
 # should NOT be excluded as they contain compiler settings and other important
 # information for Eclipse / Flash Builder.
 
+# 真实配置一律不进仓库，只提交 .env.example / .env.production.example 两个空模板
+# （不能用 .env* 通配，那样模板也会被忽略）
 .env
+.env.production
+.env.local
 .local/
 node_modules/
 
 # deploy/build.sh 的本地产物（前端静态页、linux 二进制、镜像 tar）
 deploy/dist/
+
+# 部署证书与 certbot webroot，属敏感文件，只放服务器
+deploy/certs/
+deploy/certbot/

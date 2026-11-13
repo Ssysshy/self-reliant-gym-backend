@@ -3,12 +3,14 @@ import { createRoot } from "react-dom/client";
 import {
   Button,
   ConfigProvider,
+  Divider,
   Form,
   Input,
   InputNumber,
   Modal,
   Select,
   Space,
+  Switch,
   Table,
   Tag,
   message,
@@ -33,15 +35,37 @@ interface Plan {
   Name: string;
   Published: boolean;
   Days: Day[];
+  // 小程序里的展示信息：封面、难度、单次时长、详情页分段文案。老数据可能没有
+  Meta: PlanMeta | null;
+}
+interface Block {
+  Title: string;
+  Text?: string;
+  Lines?: string[];
+}
+interface PlanMeta {
+  Cover: string;
+  Level: string;
+  Minutes: number;
+  Kcal: number;
+  Blocks: Block[];
 }
 interface Product {
   Days: number;
   Price: number;
   Enabled: boolean;
+  // 套餐卡上的说明，留空时小程序显示「会员有效期 N 天」
+  Note: string;
+  // XpayID 是后台填的商品 ID（可空）；Xpay 是实际生效值（空则回落环境变量）；
+  // Ready 表示支付配置齐全、现在真的能下单
+  XpayID: string;
+  Xpay: string;
+  Ready: boolean;
 }
 interface FeedbackRow {
   ID: number;
   Owner: number;
+  OwnerCode: string;
   Content: string;
   Status: string;
   HandledBy: string | null;
@@ -72,6 +96,7 @@ interface Order {
 }
 interface Member {
   ID: number;
+  Code: string;
   Experience: string;
   Expires: string;
 }
@@ -134,6 +159,102 @@ const blankDay = (): Day => ({
   Focus: "全身",
   Items: [{ Name: "坐姿推胸", Sets: 3, Reps: 10, Rest: 60 }],
 });
+// 新建模板时的展示信息默认值：封面留空就由小程序显示深色渐变块
+const blankMeta = (): PlanMeta => ({
+  Cover: "",
+  Level: "入门",
+  Minutes: 0,
+  Kcal: 0,
+  Blocks: [],
+});
+// 会员档位表单：新增与编辑共用。售价在表单里按「元」输入，提交时换回分（后端统一存分）。
+function ProductForm({
+  entry,
+  onDone,
+}: {
+  entry: Product | "new";
+  onDone: () => void;
+}): React.JSX.Element {
+  const isNew = entry === "new";
+  return (
+    <Form
+      key={isNew ? "new" : entry.Days}
+      layout="vertical"
+      initialValues={
+        isNew
+          ? { Days: 90, Price: 39.9, Note: "", XpayID: "", Enabled: true }
+          : { ...entry, Price: entry.Price / 100 }
+      }
+      onFinish={async (v: {
+        Days: number;
+        Price: number;
+        Note?: string;
+        XpayID?: string;
+        Enabled?: boolean;
+      }) => {
+        try {
+          const body = {
+            Days: Number(v.Days),
+            Price: Math.round(Number(v.Price) * 100),
+            Note: v.Note || "",
+            XpayID: (v.XpayID || "").trim(),
+            Enabled: !!v.Enabled,
+          };
+          if (isNew) await api("/products", body);
+          else await api("/products/" + entry.Days, body, "PUT");
+          onDone();
+        } catch (e) {
+          report(e);
+        }
+      }}
+    >
+      <Space size="large" align="start">
+        <Form.Item
+          name="Days"
+          label="有效天数"
+          rules={[{ required: true }]}
+          extra="天数即档位身份，不能和已有档位重复"
+        >
+          <InputNumber min={1} max={3650} addonAfter="天" />
+        </Form.Item>
+        <Form.Item
+          name="Price"
+          label="售价（元）"
+          rules={[{ required: true }]}
+        >
+          <InputNumber
+            min={0}
+            max={100000}
+            precision={2}
+            addonBefore="¥"
+            style={{ width: 140 }}
+          />
+        </Form.Item>
+        <Form.Item name="Enabled" label="上架" valuePropName="checked">
+          <Switch />
+        </Form.Item>
+      </Space>
+      <Form.Item
+        name="Note"
+        label="套餐说明"
+        extra="显示在套餐卡天数下方，最多 32 个字；留空则显示「会员有效期 N 天」"
+      >
+        <Input maxLength={32} showCount placeholder="例：覆盖一个完整训练周期" />
+      </Form.Item>
+      <Form.Item
+        name="XpayID"
+        label="微信虚拟支付商品 ID"
+        extra="在微信「虚拟支付」后台建好商品后把 productId 填这里；留空则用环境变量 XPAY_PRODUCT_<天数>（存量三档就是这种方式）"
+      >
+        <Input allowClear placeholder="留空用环境变量" />
+      </Form.Item>
+      <Button type="primary" htmlType="submit">
+        {isNew ? "新增" : "保存"}
+      </Button>
+    </Form>
+  );
+}
+
 // 动作资料表单：细分肌群的可选值依赖已选部位，所以单独拆一个组件拿 Form 实例。
 function ExerciseForm({
   entry,
@@ -252,6 +373,9 @@ function Console(): React.JSX.Element {
     [members, setMembers] = useState<Member[]>([]),
     [edit, setEdit] = useState<Plan | null>(null),
     [member, setMember] = useState<Member | null>(null),
+    // 注销账号：purge 是要注销的人，purgeCode 是照着编号再输一遍的确认值
+    [purge, setPurge] = useState<Member | null>(null),
+    [purgeCode, setPurgeCode] = useState(""),
     [intent, setIntent] = useState("draft"),
     [orderRows, setOrderRows] = useState<Order[]>([]),
     [grants, setGrants] = useState<Grant[]>([]),
@@ -259,6 +383,8 @@ function Console(): React.JSX.Element {
     [revokeId, setRevokeId] = useState(0),
     [reason, setReason] = useState(""),
     [products, setProducts] = useState<Product[]>([]),
+    // 正在编辑的档位："new" 是新增，Product 是编辑，null 表示弹窗关闭
+    [product, setProduct] = useState<Product | "new" | null>(null),
     [admin, setAdmin] = useState(false),
     [audit, setAudit] = useState<Audit[]>([]),
     [catalog, setCatalog] = useState<Exercise[]>([]),
@@ -266,6 +392,7 @@ function Console(): React.JSX.Element {
     [fbStatus, setFbStatus] = useState("待处理"),
     [fbEdit, setFbEdit] = useState<FeedbackRow | null>(null),
     [fbNote, setFbNote] = useState(""),
+    [fbOwner, setFbOwner] = useState(""),
     [entry, setEntry] = useState<Exercise | null>(null),
     [meta, setMeta] = useState<Meta | null>(null),
     [part, setPart] = useState(""),
@@ -291,9 +418,13 @@ function Console(): React.JSX.Element {
   }
   async function loadFeedbacks(status: string): Promise<void> {
     setFbStatus(status);
+    const qs = [
+      status ? "status=" + encodeURIComponent(status) : "",
+      fbOwner.trim() ? "owner=" + encodeURIComponent(fbOwner.trim()) : "",
+    ].filter(Boolean);
     setFeedbacks(
       await api<FeedbackRow[]>(
-        status ? "/feedbacks?status=" + encodeURIComponent(status) : "/feedbacks",
+        "/feedbacks" + (qs.length ? "?" + qs.join("&") : ""),
       ),
     );
   }
@@ -309,12 +440,58 @@ function Console(): React.JSX.Element {
   }
   async function submitPlan(values: Plan): Promise<void> {
     try {
-      await api("/templates", { ...edit, ...values, Intent: intent });
+      // 表单里的要点是一段换行分隔的文本（Form.Item 的 normalize 已经拆回数组），
+      // 这里只做清理：去掉空段、没标题的段，并把空的 Text/Lines 丢掉，别把空字段塞进 JSON
+      const meta = values.Meta;
+      const Blocks = (meta?.Blocks || [])
+        .map((b) => ({
+          Title: (b.Title || "").trim(),
+          Text: (b.Text || "").trim(),
+          Lines: (b.Lines || []).filter((s) => (s || "").trim()),
+        }))
+        .filter((b) => b.Title && (b.Text || b.Lines.length))
+        .map((b) =>
+          b.Lines.length
+            ? { Title: b.Title, Lines: b.Lines }
+            : { Title: b.Title, Text: b.Text },
+        );
+      await api("/templates", {
+        ...edit,
+        ...values,
+        Meta: {
+          Cover: (meta?.Cover || "").trim(),
+          Level: meta?.Level || "",
+          Minutes: Number(meta?.Minutes) || 0,
+          Kcal: Number(meta?.Kcal) || 0,
+          Blocks,
+        },
+        Intent: intent,
+      });
       await refresh();
       setEdit(null);
     } catch (e) {
       report(e);
     }
+  }
+  // 删除模板：用户按模板建的计划是独立副本，删模板不影响任何人的训练安排，
+  // 但会立刻从小程序的推荐列表里消失，所以先弹一次确认
+  function removePlan(p: Plan): void {
+    Modal.confirm({
+      title: "删除模板「" + p.Name + "」？",
+      content:
+        "删除后它会从后台和小程序的推荐计划里一起消失。已经按它创建的用户计划是独立的一份，不受影响。",
+      okText: "删除",
+      okButtonProps: { danger: true },
+      cancelText: "取消",
+      onOk: async () => {
+        try {
+          await api(`/templates/${p.ID}`, undefined, "DELETE");
+          await refresh();
+        } catch (e) {
+          report(e);
+        }
+      },
+    });
   }
   if (!logged)
     return (
@@ -393,6 +570,7 @@ function Console(): React.JSX.Element {
                   Name: "",
                   Published: false,
                   Days: [blankDay()],
+                  Meta: blankMeta(),
                 })
               }
             >
@@ -402,6 +580,16 @@ function Console(): React.JSX.Element {
               rowKey="ID"
               dataSource={plans}
               columns={[
+                {
+                  title: "封面",
+                  width: 96,
+                  render: (_, p: Plan) =>
+                    p.Meta?.Cover ? (
+                      <img className="cover-thumb" src={p.Meta.Cover} alt="" />
+                    ) : (
+                      <span className="dim">未设置</span>
+                    ),
+                },
                 { title: "模板名称", dataIndex: "Name" },
                 {
                   title: "每周训练",
@@ -414,7 +602,16 @@ function Console(): React.JSX.Element {
                 {
                   title: "",
                   render: (_, p: Plan) => (
-                    <Button onClick={() => setEdit(p)}>配置</Button>
+                    <Space>
+                      <Button onClick={() => setEdit(p)}>配置</Button>
+                      <Button
+                        danger
+                        type="text"
+                        onClick={() => removePlan(p)}
+                      >
+                        删除
+                      </Button>
+                    </Space>
                   ),
                 },
               ]}
@@ -514,40 +711,125 @@ function Console(): React.JSX.Element {
           </>
         )}
         {page === "会员套餐" && (
-          <Table
-            rowKey="Days"
-            dataSource={products}
-            columns={[
-              { title: "有效天数", dataIndex: "Days" },
-              { title: "售价（元）", render: (_, p: Product) => p.Price / 100 },
-              {
-                title: "状态",
-                render: (_, p: Product) => (p.Enabled ? "已上架" : "已下架"),
-              },
-              {
-                title: "",
-                render: (_, p: Product) => (
-                  <Button
-                    disabled={!admin}
-                    onClick={async () => {
-                      try {
-                        await api(
-                          "/products/" + p.Days,
-                          { Enabled: !p.Enabled },
-                          "PUT",
-                        );
-                        await openPage("会员套餐");
-                      } catch (e) {
-                        report(e);
-                      }
-                    }}
-                  >
-                    {p.Enabled ? "下架" : "上架"}
-                  </Button>
-                ),
-              },
-            ]}
-          />
+          <>
+            <Space style={{ marginBottom: 16 }} wrap>
+              <Button
+                type="primary"
+                disabled={!admin}
+                onClick={() => setProduct("new")}
+              >
+                新增套餐
+              </Button>
+              <span style={{ color: "#999" }}>
+                小程序只展示「已上架」的档位；商品 ID 没配好的档位会显示「支付未就绪」，用户那边是「暂未开放」。
+              </span>
+            </Space>
+            <Table
+              rowKey="Days"
+              dataSource={products}
+              locale={{ emptyText: "还没有档位，点「新增套餐」建一个" }}
+              columns={[
+                {
+                  title: "有效天数",
+                  dataIndex: "Days",
+                  width: 110,
+                  render: (v: number) => v + " 天",
+                },
+                {
+                  title: "售价（元）",
+                  width: 110,
+                  render: (_: unknown, p: Product) => p.Price / 100,
+                },
+                {
+                  title: "套餐说明",
+                  dataIndex: "Note",
+                  render: (v: string) => v || "-",
+                },
+                {
+                  title: "微信商品 ID",
+                  width: 240,
+                  render: (_: unknown, p: Product) =>
+                    p.Xpay ? (
+                      <Space size={4}>
+                        <span>{p.Xpay}</span>
+                        {!p.XpayID && <Tag>环境变量</Tag>}
+                      </Space>
+                    ) : (
+                      <Tag color="red">未配置</Tag>
+                    ),
+                },
+                {
+                  title: "状态",
+                  width: 190,
+                  render: (_: unknown, p: Product) => (
+                    <Space size={4}>
+                      <Tag color={p.Enabled ? "green" : "default"}>
+                        {p.Enabled ? "已上架" : "已下架"}
+                      </Tag>
+                      {p.Enabled && !p.Ready && (
+                        <Tag color="orange">支付未就绪</Tag>
+                      )}
+                    </Space>
+                  ),
+                },
+                {
+                  title: "",
+                  width: 160,
+                  render: (_: unknown, p: Product) => (
+                    <Space size={4}>
+                      <Button disabled={!admin} onClick={() => setProduct(p)}>
+                        编辑
+                      </Button>
+                      <Button
+                        danger
+                        disabled={!admin}
+                        onClick={() =>
+                          Modal.confirm({
+                            title: "删除 " + p.Days + " 天套餐？",
+                            content:
+                              "删掉后小程序不再展示这一档，已付订单与已到账的会员不受影响。",
+                            okText: "删除",
+                            okButtonProps: { danger: true },
+                            onOk: async () => {
+                              try {
+                                await api(
+                                  "/products/" + p.Days,
+                                  undefined,
+                                  "DELETE",
+                                );
+                                await openPage("会员套餐");
+                              } catch (e) {
+                                report(e);
+                              }
+                            },
+                          })
+                        }
+                      >
+                        删除
+                      </Button>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+            <Modal
+              open={!!product}
+              title={product === "new" ? "新增套餐" : "编辑套餐"}
+              footer={null}
+              destroyOnClose
+              onCancel={() => setProduct(null)}
+            >
+              {product && (
+                <ProductForm
+                  entry={product}
+                  onDone={async () => {
+                    setProduct(null);
+                    await openPage("会员套餐");
+                  }}
+                />
+              )}
+            </Modal>
+          </>
         )}
         {page === "操作记录" && (
           <Table
@@ -563,7 +845,15 @@ function Console(): React.JSX.Element {
         )}
         {page === "用户反馈" && (
           <>
-            <Space style={{ marginBottom: 16 }}>
+            <Space style={{ marginBottom: 16 }} wrap>
+              <Input.Search
+                placeholder="按用户编号查（如 U3M8Q2K）"
+                allowClear
+                style={{ width: 260 }}
+                value={fbOwner}
+                onChange={(e) => setFbOwner(e.target.value)}
+                onSearch={() => void loadFeedbacks(fbStatus).catch(report)}
+              />
               {["待处理", "已处理", ""].map((s) => (
                 <Button
                   key={s || "全部"}
@@ -587,7 +877,12 @@ function Console(): React.JSX.Element {
                     <Tag color={v === "已处理" ? "green" : "orange"}>{v}</Tag>
                   ),
                 },
-                { title: "用户编号", dataIndex: "Owner", width: 92 },
+                {
+                  title: "用户编号",
+                  dataIndex: "OwnerCode",
+                  width: 110,
+                  render: (v: string) => v || "-",
+                },
                 {
                   title: "反馈内容",
                   dataIndex: "Content",
@@ -702,7 +997,8 @@ function Console(): React.JSX.Element {
         {page === "会员管理" && (
           <>
             <Input.Search
-              placeholder="按用户 ID 查询"
+              placeholder="按用户编号查（如 U3M8Q2K）"
+              allowClear
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               onSearch={() => void loadMembers().catch(report)}
@@ -711,7 +1007,11 @@ function Console(): React.JSX.Element {
               rowKey="ID"
               dataSource={members}
               columns={[
-                { title: "用户 ID", dataIndex: "ID" },
+                {
+                  title: "用户编号",
+                  dataIndex: "Code",
+                  render: (v: string, m: Member) => v || "#" + m.ID,
+                },
                 { title: "训练经验", dataIndex: "Experience" },
                 {
                   title: "会员有效期",
@@ -743,11 +1043,66 @@ function Console(): React.JSX.Element {
                       >
                         权益流水
                       </Button>
+                      {admin && (
+                        <Button
+                          danger
+                          onClick={() => {
+                            setPurgeCode("");
+                            setPurge(m);
+                          }}
+                        >
+                          注销
+                        </Button>
+                      )}
                     </Space>
                   ),
                 },
               ]}
             />
+            <Modal
+              open={!!purge}
+              title="注销账号"
+              okText="确认注销"
+              cancelText="取消"
+              okButtonProps={{
+                danger: true,
+                disabled:
+                  !purge ||
+                  purgeCode.trim().toUpperCase() !==
+                    (purge.Code || "").toUpperCase(),
+              }}
+              onCancel={() => setPurge(null)}
+              onOk={async () => {
+                if (!purge) return;
+                try {
+                  await api(
+                    "/members/" + purge.ID,
+                    { Code: purgeCode.trim() },
+                    "DELETE",
+                  );
+                  setPurge(null);
+                  await loadMembers();
+                  void message.success("已注销");
+                } catch (e) {
+                  report(e);
+                }
+              }}
+            >
+              <p>
+                注销后不可恢复：账号、计划、训练记录、反馈与人工权益流水会一起删除。
+              </p>
+              <p>
+                已支付订单保留但脱敏（不再关联到具体用户），用于交易留档；账号还有待支付订单时不允许注销。
+              </p>
+              <p>
+                请输入用户编号 <b>{purge?.Code}</b> 确认：
+              </p>
+              <Input
+                value={purgeCode}
+                onChange={(e) => setPurgeCode(e.target.value)}
+                placeholder={purge?.Code}
+              />
+            </Modal>
           </>
         )}
         <Modal
@@ -761,7 +1116,17 @@ function Console(): React.JSX.Element {
           {edit && (
             <Form
               key={edit.ID}
-              initialValues={edit}
+              initialValues={{
+                ...edit,
+                // Meta 可能为 null（早期模板），填一套空值让表单能从零开始编辑
+                Meta: {
+                  Cover: edit.Meta?.Cover || "",
+                  Level: edit.Meta?.Level || "",
+                  Minutes: edit.Meta?.Minutes || 0,
+                  Kcal: edit.Meta?.Kcal || 0,
+                  Blocks: edit.Meta?.Blocks || [],
+                },
+              }}
               layout="vertical"
               onFinish={submitPlan}
             >
@@ -772,6 +1137,96 @@ function Console(): React.JSX.Element {
               >
                 <Input />
               </Form.Item>
+
+              <Divider orientation="left" plain>
+                小程序展示
+              </Divider>
+              <Form.Item
+                name={["Meta", "Cover"]}
+                label="封面图链接"
+                extra="贴 https 图片地址，留空时小程序显示深色渐变块。图片所在域名要加进小程序后台的「downloadFile 合法域名」，否则真机加载不出来。"
+              >
+                <Input placeholder="https://example.com/cover.jpg" allowClear />
+              </Form.Item>
+              <Form.Item
+                noStyle
+                shouldUpdate={(a, b) => a.Meta?.Cover !== b.Meta?.Cover}
+              >
+                {({ getFieldValue }) => {
+                  const src = getFieldValue(["Meta", "Cover"]) as
+                    | string
+                    | undefined;
+                  return src ? (
+                    <img className="cover-preview" src={src} alt="" />
+                  ) : null;
+                }}
+              </Form.Item>
+              <Space>
+                <Form.Item name={["Meta", "Level"]} label="难度">
+                  <Select
+                    style={{ width: 120 }}
+                    allowClear
+                    options={["入门", "中级", "进阶"].map((v) => ({
+                      value: v,
+                      label: v,
+                    }))}
+                  />
+                </Form.Item>
+                <Form.Item name={["Meta", "Minutes"]} label="单次时长（分钟）">
+                  <InputNumber min={0} max={300} />
+                </Form.Item>
+              </Space>
+              <Form.List name={["Meta", "Blocks"]}>
+                {(blocks, ops) => (
+                  <>
+                    {blocks.map((b) => (
+                      <section key={b.key} className="meta-block">
+                        <Form.Item label="小标题" name={[b.name, "Title"]}>
+                          <Input placeholder="例如：计划介绍 / 计划结构 / 核心理念" />
+                        </Form.Item>
+                        <Form.Item label="正文" name={[b.name, "Text"]}>
+                          <Input.TextArea
+                            autoSize={{ minRows: 2 }}
+                            placeholder="整段说明；填了要点就只显示要点"
+                          />
+                        </Form.Item>
+                        <Form.Item
+                          label="要点"
+                          name={[b.name, "Lines"]}
+                          // 存的是字符串数组，表单里用一个多行文本编辑，进出各转换一次
+                          getValueProps={(v) => ({
+                            value: ((v as string[]) || []).join("\n"),
+                          })}
+                          normalize={(v) =>
+                            String(v)
+                              .split("\n")
+                              .map((s) => s.trim())
+                              .filter(Boolean)
+                          }
+                          extra="一行一条；需要 ①②③ 就自己写在行首"
+                        >
+                          <Input.TextArea autoSize={{ minRows: 2 }} />
+                        </Form.Item>
+                        <Button onClick={() => ops.remove(b.name)}>
+                          移除此段
+                        </Button>
+                      </section>
+                    ))}
+                    <Button
+                      onClick={() =>
+                        ops.add({ Title: "", Text: "", Lines: [] })
+                      }
+                      style={{ marginBottom: 20 }}
+                    >
+                      添加一段介绍
+                    </Button>
+                  </>
+                )}
+              </Form.List>
+
+              <Divider orientation="left" plain>
+                训练安排
+              </Divider>
               <Form.List name="Days">
                 {(days, { add, remove }) => (
                   <>

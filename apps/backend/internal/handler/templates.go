@@ -1,10 +1,13 @@
 package handler
 
 import (
+	"errors"
+	"strconv"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
-	"time"
 )
 
 type TemplateDraft struct {
@@ -84,11 +87,16 @@ func templateEditor(g *gin.RouterGroup) {
 				}
 				p.Name = input.Name
 				p.Days = input.Days
+				p.Meta = input.Meta
 				p.Published = true
 			} else if input.Intent == "withdraw" {
 				p.Published = false
-			} else if p.ID == 0 {
-				p.Name = input.Name
+			} else {
+				// 草稿态也要把展示信息落库：封面和介绍文案填好一按「保存草稿」就丢，很容易白填
+				p.Meta = input.Meta
+				if p.ID == 0 {
+					p.Name = input.Name
+				}
 			}
 			p.Revision++
 			if err := tx.Save(&p).Error; err != nil {
@@ -105,6 +113,30 @@ func templateEditor(g *gin.RouterGroup) {
 			}
 			return tx.Create(&Audit{Actor: c.GetString("actor"), Action: input.Intent, Target: p.ID}).Error
 		})
+		result(c, true, e)
+	})
+	// 删官方模板。只认 owner=0：用户按模板建的计划是另起一行的副本（owner=用户 ID），
+	// 所以删模板不会影响任何人的训练计划，历史训练记录也是当时的快照。
+	g.DELETE("/templates/:id", func(c *gin.Context) {
+		id, _ := strconv.Atoi(c.Param("id"))
+		e := db.Transaction(func(tx *gorm.DB) error {
+			var p Plan
+			if err := tx.Where("owner=0 AND id=?", id).First(&p).Error; err != nil {
+				return err
+			}
+			// 草稿表按模板 ID 主键，先清掉，免得删完留下一条指向空模板的草稿
+			if err := tx.Delete(&TemplateDraft{}, p.ID).Error; err != nil {
+				return err
+			}
+			if err := tx.Delete(&Plan{}, p.ID).Error; err != nil {
+				return err
+			}
+			return tx.Create(&Audit{Actor: c.GetString("actor"), Action: "delete", Target: p.ID}).Error
+		})
+		if errors.Is(e, gorm.ErrRecordNotFound) {
+			fail(c, 404, "模板不存在")
+			return
+		}
 		result(c, true, e)
 	})
 }

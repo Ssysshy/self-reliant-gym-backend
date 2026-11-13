@@ -20,6 +20,25 @@ cd apps/backend && go run ./cmd/api
 
 `.env` 中 `MYSQL_DSN` 默认指向 `127.0.0.1:3306`，按本机 MySQL 的账号口令改；`SESSION_SECRET` 至少 32 字节。国内网络下载依赖建议设置 `go env -w GOPROXY=https://goproxy.cn,direct`。
 
+两份环境模板，别用错：
+
+| 文件 | 用途 | 关键差异 |
+|---|---|---|
+| `.env.example` | 本机开发，`cp .env.example .env` | `GYM_LOCAL=1`、`WX_SECRET` 可空（登录退化为固定测试账号）、`MYSQL_DSN` 指 `127.0.0.1:3306` |
+| `.env.production.example` | 服务器 | `GYM_LOCAL=0`、`WX_SECRET` 必填、口令全换真值 |
+
+服务器上 `GYM_LOCAL=1` 且 `WX_SECRET` 为空时，所有登录都会落到同一个测试用户 `local_dev_user`，数据串成一片——这是最容易漏的一条。
+
+切环境不用改文件，用 `ENV_FILE` 指定读哪一份，默认仍是向上查找 `.env`：
+
+```bash
+cd apps/backend
+go run ./cmd/api                                  # 读 .env（开发）
+ENV_FILE=../../.env.production go run ./cmd/api   # 只读这份，指错路径直接退出，不退回 .env
+```
+
+`.env`、`.env.production`、`.env.local` 都在 `.gitignore` 里，只提交两个 `*.example` 模板。
+
 前端后台在 `apps/frontend`，`pnpm dev` 启动后由 Vite 把 `/api` 代理到 `127.0.0.1:18080`。
 
 ## 容器部署
@@ -83,6 +102,7 @@ ssh user@<服务器> 'cd <仓库路径> && docker compose --env-file .env -f dep
 ```bash
 ./deploy/publish.sh user@1.2.3.4              # 日常发布
 ./deploy/publish.sh user@1.2.3.4 --config     # 首次部署，连 compose 和 .env 一起传
+./deploy/publish.sh user@1.2.3.4 --config --env .env.production   # 传生产配置
 ```
 
 它按顺序做：连通性检查 → 调 `build.sh` 构建 → 建远程目录 → `scp` 上传镜像包 → `docker load` → `docker compose up -d`（不带 `--build`）→ 打印 `ps` 和内存占用。任何一步失败立即退出，不会留下半启动状态。
@@ -90,15 +110,48 @@ ssh user@<服务器> 'cd <仓库路径> && docker compose --env-file .env -f dep
 | 参数 | 作用 |
 |---|---|
 | `--path <dir>` | 服务器上的目录，默认 `/opt/gym`，必须是绝对路径 |
-| `--config` | 同时上传 `deploy/docker-compose.yml` 和 `.env`，首次部署用 |
+| `--config` | 同时上传 `deploy/docker-compose.yml`、配置文件和已备好的证书，首次部署用 |
+| `--env <file>` | 配合 `--config` 指定上传哪份配置，默认 `.env`；生产部署用 `--env .env.production` |
 | `--skip-build` | 跳过构建，直接发布已有的 `deploy/dist/gym-images.tar` |
 
-两个刻意的设计：
+三个刻意的设计：
 
 - **默认不传 `.env`**。开发机上的 `.env` 通常是测试口令，直接覆盖服务器的生产密钥是会出事的，所以丢配置时脚本是报错退出、提示你加 `--config`，而不是悄悄传上去。
+- **`--config` 上传前先校验**：`GYM_LOCAL=1`、`WX_SECRET` 为空、`SESSION_SECRET` 不足 32 字节、还留着 `__CHANGE_ME` 占位符，任何一条命中就直接退出并说明原因。这几项错了不会报错，只会静默地让所有人变成同一个测试用户，必须在传之前拦住。
 - **不用 `rsync`**，只用 `scp` + `ssh`，服务器不需要额外装东西。
 
 建议先配好免密钥登录（`ssh-copy-id user@host`），否则连通性检查、建目录、传包、load、up、ps 每一步都要输一次密码。
+
+### 对外 HTTPS（有域名之后）
+
+默认 compose 把 web 绑在 `127.0.0.1:18080`，公网访问不到，只能走 SSH 隧道：
+
+```bash
+ssh -L 18080:127.0.0.1:18080 user@host        # 本机访问 http://127.0.0.1:18080
+```
+
+小程序只接受 HTTPS + 已登记的合法域名，所以对外必须补一层证书。用叠加文件，不动基础编排：
+
+```bash
+# 1. 把 deploy/nginx.https.conf 里的 api.example.com 全部换成自己的域名
+# 2. 放证书：deploy/certs/fullchain.pem（服务器证书 + 中间证书，顺序不能反）
+#            deploy/certs/privkey.pem
+# 3. 启动
+docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.https.yml up -d
+```
+
+叠加文件只做三件事：暴露 80/443、把 `nginx.https.conf` 挂进容器替换默认配置、挂载 `deploy/certs`（只读）。回滚就去掉 `-f deploy/docker-compose.https.yml` 重新 `up -d`。
+
+走 `publish.sh` 的话不用手敲这些：
+
+- 首次部署带 `--config`，脚本发现 `deploy/certs/fullchain.pem` 与 `privkey.pem` 都在，就把证书、叠加文件、`nginx.https.conf` 成套传上去（没证书就不传，避免 nginx 挂不上证书起不来）
+- 之后日常 `publish.sh` 会检测服务器上有没有 `deploy/docker-compose.https.yml`，有就自动追加 `-f`，否则一次普通发布就会把 443 和证书挂载悄悄弄丢
+
+`nginx.https.conf` 里 80 端口只做 301 跳转（保留 `/.well-known/acme-challenge/` 给 certbot 续期），443 上只开 TLS 1.2/1.3——小程序不接受更低版本。证书和 certbot webroot 目录都已写进 `.gitignore`，不进仓库。
+
+证书来源：云厂商免费 DV 证书（下载 Nginx 格式直接拷）、`certbot certonly --webroot -w deploy/certbot/www -d api.example.com`、或挂在自己的 CDN/负载均衡上（此时不叠加那层 compose，改成回源 `18080:80` 并限制安全组）。
+
+证书链不完整是小程序侧最常见的故障：`request:fail ssl hand shake error` 基本都是只传了服务器证书、漏了中间证书。
 
 ### 基础镜像拉不动时
 
@@ -143,3 +196,31 @@ sudo ./deploy/server-init.sh
 它会创建 2GB swapfile 并写入 `/etc/fstab`（已有 swap 则跳过），同时把 `vm.swappiness` 调到 10。默认值 60 会在内存还宽裕时就把 MySQL 的 buffer pool 换出到磁盘，查询延迟会从毫秒级跳到几十毫秒；10 表示只在真的吃紧时才用 swap，把它当兜底而不是日常资源。
 
 起完服务后用 `docker stats --no-stream` 看实际占用，如果 mysql 长期贴着 640m 上限，说明数据量已经超出这台机器的容量，该考虑拆库了。
+
+## 备份与恢复
+
+`gym-data` 是 Docker named volume，`docker compose down`、重新发布、重启容器都不会动它。但它**不是备份**：误删数据、迁移脚本写错、业务逻辑把数据刷坏、磁盘故障，这几种情况都没有退路。所以需要定时导出一份逻辑备份。
+
+```bash
+./deploy/backup.sh                  # 备份一次，保留 7 天
+./deploy/backup.sh --keep 14        # 保留 14 天；--keep 0 表示永不清理
+./deploy/backup.sh --out /data/bak  # 换个输出目录，比如挂载的数据盘
+./deploy/backup.sh --install-cron   # 写进 root crontab，每天 03:30 自动跑（已存在则跳过）
+```
+
+产物是 `backups/gym_<时间戳>.sql.gz`，用 `mysqldump --single-transaction --quick` 导出：走 InnoDB 一致性快照不锁表，逐行发送不占内存，2G 机器上跑得动。生成时先写 `.tmp`、校验通过才 `mv` 成正式文件名，被 OOM Killer 杀掉也不会留下一个看起来正常、实际截断的包。
+
+校验有两条：`gzip -t` 过压缩完整性，再检查结尾有没有 `-- Dump completed`。只查前者不够——截断的 gzip 流未必报错。
+
+恢复（dump 里带 `CREATE DATABASE` 和 `DROP TABLE IF EXISTS`，会覆盖同名库的表）：
+
+```bash
+gunzip -c backups/gym_20261113_033000.sql.gz \
+  | docker compose --env-file .env -f deploy/docker-compose.yml exec -T mysql mysql -uroot -p
+```
+
+恢复前先 `cp` 一份现在的库，或者拿一个临时库名试一遍——`DROP TABLE IF EXISTS` 是直接生效的，没有二次确认。
+
+**备份和数据库在同一块盘上，盘坏了会一起没。** 定期把 `backups/` 里最新的那份 `scp` 回本地，或者传对象存储，才算完整。
+
+清理只匹配 `gym_*.sql.gz`，`backups/` 里手工导出的 `.sql`（项目里那几份 `plans_*.sql`）不会被删。

@@ -1,0 +1,23 @@
+# 对外 HTTPS 部署的叠加配置，不替换 docker-compose.yml，两者一起用：
+#
+#   docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-compose.https.yml up -d
+#
+# 只做三件事：把 80/443 暴露到公网、换上 HTTPS 版 nginx 配置、把证书目录挂进容器。
+# 去掉的写法就是回滚到"只有本机能访问"的状态：
+#
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d
+#
+# 相对路径相对于本文件所在目录（deploy/），所以证书放 deploy/certs/、certbot webroot 放 deploy/certbot/www/。
+# 这两个目录已在 .gitignore 里，证书不会被误提交。
+
+services:
+  web:
+    ports:
+      # 基础文件里只有 127.0.0.1:18080:80，那是给 SSH 隧道调试用的，这里补上对外端口
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.https.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./certs:/etc/nginx/certs:ro
+      # certbot --webroot 续期用；不用 certbot 时这个目录空着也无妨
+      - ./certbot/www:/var/www/certbot:ro
