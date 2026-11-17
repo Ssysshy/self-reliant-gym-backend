@@ -368,6 +368,7 @@ function ExerciseForm({
 }
 function Console(): React.JSX.Element {
   const [logged, setLogged] = useState(false),
+    [pwOpen, setPwOpen] = useState(false),
     [page, setPage] = useState("训练模板"),
     [plans, setPlans] = useState<Plan[]>([]),
     [members, setMembers] = useState<Member[]>([]),
@@ -547,6 +548,7 @@ function Console(): React.JSX.Element {
             {p}
           </button>
         ))}
+        <button onClick={() => setPwOpen(true)}>修改密码</button>
         <button
           onClick={() =>
             void api("/logout", {})
@@ -556,6 +558,63 @@ function Console(): React.JSX.Element {
         >
           退出登录
         </button>
+        <Modal
+          open={pwOpen}
+          title="修改密码"
+          footer={null}
+          destroyOnClose
+          onCancel={() => setPwOpen(false)}
+        >
+          <Form
+            layout="vertical"
+            onFinish={async (v: {
+              Old: string;
+              New: string;
+              Confirm: string;
+            }) => {
+              try {
+                await api("/password", { Old: v.Old, New: v.New });
+                message.success("密码已修改，其他设备需要重新登录");
+                setPwOpen(false);
+              } catch (e) {
+                report(e);
+              }
+            }}
+          >
+            <Form.Item label="原密码" name="Old" rules={[{ required: true }]}>
+              <Input.Password autoComplete="current-password" />
+            </Form.Item>
+            <Form.Item
+              label="新密码"
+              name="New"
+              rules={[
+                { required: true, message: "请设置新密码" },
+                { min: 8, message: "新密码至少 8 位" },
+              ]}
+            >
+              <Input.Password autoComplete="new-password" />
+            </Form.Item>
+            <Form.Item
+              label="确认新密码"
+              name="Confirm"
+              dependencies={["New"]}
+              rules={[
+                { required: true, message: "请再输入一次新密码" },
+                ({ getFieldValue }) => ({
+                  validator: (_, value: string) =>
+                    !value || getFieldValue("New") === value
+                      ? Promise.resolve()
+                      : Promise.reject(new Error("两次输入不一致")),
+                }),
+              ]}
+            >
+              <Input.Password autoComplete="new-password" />
+            </Form.Item>
+            <Button block type="primary" htmlType="submit">
+              确认修改
+            </Button>
+          </Form>
+        </Modal>
       </aside>
       <main>
         <h1>{page}</h1>

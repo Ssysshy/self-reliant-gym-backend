@@ -263,6 +263,7 @@ func Run() {
 	}
 	a.POST("/login", staffLogin)
 	a.Use(staffAuth)
+	a.POST("/password", changePassword)
 	a.GET("/me", func(c *gin.Context) { c.JSON(200, gin.H{"admin": c.GetBool("admin")}) })
 	a.POST("/orders/:id/reconcile", reconcile)
 	u.POST("/orders/:id/reconcile", reconcile)

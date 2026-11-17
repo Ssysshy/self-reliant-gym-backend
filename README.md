@@ -122,6 +122,30 @@ ssh user@<服务器> 'cd <仓库路径> && docker compose --env-file .env -f dep
 
 建议先配好免密钥登录（`ssh-copy-id user@host`），否则连通性检查、建目录、传包、load、up、ps 每一步都要输一次密码。
 
+### 没有域名时：用公网 IP 访问后台
+
+域名和证书还没准备好，又要在浏览器里打开后台管理页，用叠加文件 `deploy/docker-compose.public.yml` 把 `web` 多绑一个对外端口：
+
+```bash
+# 首次部署顺手打开（会一并上传叠加文件）
+./deploy/publish.sh root@1.2.3.4 --config --env .env.production --public
+
+# 之后普通发布即可，脚本检测到服务器上该文件存在就会自动带上
+./deploy/publish.sh root@1.2.3.4
+```
+
+访问 `http://<公网IP>:8080`。**安全组必须放行 TCP 8080**，否则连不上；`127.0.0.1:18080` 那条仍然保留，SSH 隧道调试不受影响。
+
+叠加只加一条端口映射，不动 nginx 配置：后台页由 nginx 托管，`/api/` 反代给 `api`，前端 `fetch("/api/admin/v1...")` 是同源相对路径，所以不需要改任何前端代码，也不涉及 CORS。
+
+三个前提：
+
+- **只能打开后台，小程序照旧不通**。微信小程序的 `request` 只接受 HTTPS + 已登记域名，IP + HTTP 一律被拒。这一步只解决"人用浏览器看后台"。
+- **是明文 HTTP**。登录口令和 session cookie 在公网上裸奔，务必先把 `.env.production` 里的 `ADMIN_PASSWORD`、`OPERATOR_PASSWORD` 换成强口令；更稳的做法是在安全组里把 8080 的来源 IP 限制成你自己的出口 IP。
+- **8080 是刻意选的**，不占用 18080（已绑在 127.0.0.1），也不碰 80/443，将来叠加 HTTPS 时三者互不冲突。
+
+关掉公网入口：`ssh root@1.2.3.4 'rm /opt/gym/deploy/docker-compose.public.yml'`，然后重新发布一次即可，端口立刻收回。
+
 ### 对外 HTTPS（有域名之后）
 
 默认 compose 把 web 绑在 `127.0.0.1:18080`，公网访问不到，只能走 SSH 隧道：

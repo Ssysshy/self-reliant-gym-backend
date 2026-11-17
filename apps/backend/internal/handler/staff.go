@@ -5,7 +5,9 @@ import (
 	"encoding/hex"
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -56,8 +58,22 @@ func staffLogin(c *gin.Context) {
 		save(c, nil, e)
 		return
 	}
-	c.SetSameSite(3)
-	c.SetCookie("gym_admin", id, 43200, "/api/admin", "", os.Getenv("GYM_LOCAL") != "1", true)
+	// cookie 的 Secure 属性决定浏览器是否在明文 HTTP 下保存它：
+	// 生产走 HTTPS 时必须为 true；但此时若只有一个公网 IP、没法上证书，
+	// 浏览器会静默丢弃这个 cookie，表现为「登录返回成功，下一个接口却要重新登录」。
+	// 所以给它一个显式开关，默认仍按老逻辑（非 GYM_LOCAL 即要求 HTTPS）。
+	secure := os.Getenv("GYM_LOCAL") != "1"
+	if v := os.Getenv("COOKIE_SECURE"); v != "" {
+		secure = v == "1"
+	}
+	// SameSite=None 必须搭配 Secure，否则同样会被浏览器拒绝；
+	// 降级到明文时退回 Lax —— 后台页与 /api 同源，Lax 足够。
+	sameSite := http.SameSiteLaxMode
+	if secure {
+		sameSite = http.SameSiteNoneMode
+	}
+	c.SetSameSite(sameSite)
+	c.SetCookie("gym_admin", id, 43200, "/api/admin", "", secure, true)
 	c.JSON(200, true)
 }
 func staffAuth(c *gin.Context) {
@@ -89,3 +105,49 @@ func staffAuth(c *gin.Context) {
 }
 
 func (Staff) TableName() string { return "staffs" }
+
+// changePassword 改当前登录账号的密码。
+// 旧密码校验通过才写新哈希；同时清掉这个账号的其他 session ——
+// 密码改了、旧登录态还能用 12 小时，等于没改。当前这条 session 保留，
+// 免得改完立刻被踢出去。
+func changePassword(c *gin.Context) {
+	var in struct{ Old, New string }
+	if c.ShouldBindJSON(&in) != nil {
+		fail(c, 400, "参数错误")
+		return
+	}
+	// bcrypt 只处理前 72 字节，超长会被静默截断，所以显式挡住
+	if n := len([]byte(in.New)); n < 8 || n > 72 {
+		fail(c, 400, "新密码长度需在 8 到 72 字节之间")
+		return
+	}
+	if in.Old == in.New {
+		fail(c, 400, "新密码不能与原密码相同")
+		return
+	}
+	var staff Staff
+	if e := db.First(&staff, c.GetUint("uid")).Error; e != nil {
+		fail(c, 401, "请登录")
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(staff.Hash), []byte(in.Old)) != nil {
+		fail(c, 400, "原密码不正确")
+		return
+	}
+	hash, e := bcrypt.GenerateFromPassword([]byte(in.New), bcrypt.DefaultCost)
+	if e != nil {
+		fail(c, 500, "修改失败")
+		return
+	}
+	e = db.Transaction(func(tx *gorm.DB) error {
+		if e := tx.Model(&Staff{}).Where("id=?", staff.ID).Update("hash", string(hash)).Error; e != nil {
+			return e
+		}
+		return tx.Where("staff_id=? AND id<>?", staff.ID, c.GetString("sid")).Delete(&StaffSession{}).Error
+	})
+	if e != nil {
+		save(c, nil, e)
+		return
+	}
+	c.JSON(200, true)
+}
