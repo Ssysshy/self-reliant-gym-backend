@@ -28,6 +28,9 @@ node_modules/
 # deploy/build.sh 的本地产物（前端静态页、linux 二进制、镜像 tar）
 deploy/dist/
 
+# build.sh 归档的历史镜像包，每个约 42M，不进仓库
+base/
+
 # 部署证书与 certbot webroot，属敏感文件，只放服务器
 deploy/certs/
 deploy/certbot/

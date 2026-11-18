@@ -20,5 +20,7 @@ RUN CGO_ENABLED=0 go build -mod=mod -trimpath -o /gym ./cmd/api
 FROM alpine:3 AS api
 RUN apk add --no-cache ca-certificates tzdata
 COPY --from=build-api /gym /usr/local/bin/gym
+# 内置动作库与官方模板，随镜像带上作参考数据，启动不读
+COPY seed /app/seed
 USER nobody
 CMD ["gym"]

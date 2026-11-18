@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
-# 数据库逻辑备份：容器内 mysqldump → gzip → 落到宿主机 backups/，按天保留。
+# 数据库逻辑备份：宿主机 mysqldump → gzip → 落到 backups/，按天保留。
+# 数据库跑在宿主机上（不在容器里），所以直接用宿主机的 mysqldump 连 127.0.0.1。
+# 用业务账号 gym 备份，不需要 root —— 全库只有一个 schema，且本项目的迁移只建表，
+# 没有存储过程/函数，所以不加 --routines（那需要读 mysql.proc 的权限）。
+# 将来若真加了 routine，再补这个参数并换一个有全局 SELECT 的账号。
 #
 #   ./deploy/backup.sh                     # 备份一次，保留 7 天
 #   ./deploy/backup.sh --keep 14           # 保留 14 天
@@ -7,8 +11,7 @@
 #   ./deploy/backup.sh --install-cron      # 装进 root crontab，每天 03:30 自动跑
 #
 # 恢复（dump 里带了 CREATE DATABASE 和 DROP TABLE IF EXISTS，会覆盖同名库的表）：
-#   gunzip -c backups/gym_20261113_033000.sql.gz \
-#     | docker compose --env-file .env -f deploy/docker-compose.yml exec -T mysql mysql -uroot -p
+#   gunzip -c backups/gym_20261113_033000.sql.gz | mysql -h127.0.0.1 -ugym -p
 #
 # 设计取舍：
 # - 用逻辑备份而不是 xtrabackup 物理备份：数据量在百 MB 级，逻辑备份体积小、能单表
@@ -18,15 +21,14 @@
 # - 先写 .tmp 再 mv：中途 OOM 或断连不会留下一个大小正常、内容却被截断的 .gz，
 #   那种文件在真需要恢复的那天才发现，等于没备份。
 # - 清理只匹配自己生成的 ${DB_NAME}_*.sql.gz，不会碰 backups/ 里手工导的那些 .sql。
-# - 密码通过容器内的 MYSQL_PWD 传，不出现在 mysqldump 的 argv 里（docker exec 的 argv
-#   里仍可见，但执行者是本机 root，本来就能读 .env，没有额外暴露面）。
+# - 密码通过 MYSQL_PWD 环境变量传，不出现在 mysqldump 的 argv 里（ps 看不到）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-COMPOSE_ARGS="-f deploy/docker-compose.yml"
 BACKUP_DIR="$ROOT/backups"
 KEEP_DAYS=7
 DB_NAME="gym"
+DB_HOST="127.0.0.1"
 INSTALL_CRON=0
 CRON_SPEC="30 3 * * *"
 LOG_MAX_BYTES=1048576
@@ -43,8 +45,7 @@ usage() {
   -h, --help      显示帮助
 
 恢复:
-  gunzip -c backups/gym_<时间戳>.sql.gz \
-    | docker compose --env-file .env -f deploy/docker-compose.yml exec -T mysql mysql -uroot -p
+  gunzip -c backups/gym_<时间戳>.sql.gz | mysql -h127.0.0.1 -ugym -p
 
 注意: 备份文件默认落在同一块盘上，磁盘故障时会连备份一起丢。
       重要数据另外 scp 回本地，或上传到对象存储。
@@ -69,8 +70,6 @@ esac
 # compose 的相对路径（../.env、deploy/Dockerfile）都基于文件位置，必须从仓库根执行
 cd "$ROOT"
 
-dc() { docker compose --env-file .env $COMPOSE_ARGS "$@"; }
-
 # 与 publish.sh 一致的取法：.env 只做简单文本解析，不 source —— 值里带空格或 # 时
 # source 会截断，甚至执行到意料之外的东西
 env_value() {
@@ -78,15 +77,18 @@ env_value() {
 }
 
 [ -f .env ] || { echo "$ROOT/.env 不存在，先按 .env.production.example 准备生产配置"; exit 1; }
-command -v docker >/dev/null || { echo "没装 docker"; exit 1; }
+command -v mysqldump >/dev/null || {
+  echo "没装 mysqldump（mysql-client / mysql 包里带这个命令）"
+  exit 1
+}
 
-ROOT_PW="$(env_value MYSQL_ROOT_PASSWORD)"
-[ -n "$ROOT_PW" ] || { echo ".env 里 MYSQL_ROOT_PASSWORD 为空，无法备份"; exit 1; }
+APP_PW="$(env_value MYSQL_PASSWORD)"
+[ -n "$APP_PW" ] || { echo ".env 里 MYSQL_PASSWORD 为空，无法备份"; exit 1; }
 
-# 容器没起时 mysqldump 只会抛一句 "service mysql is not running"，不如提前说清楚
-if [ -z "$(dc ps -q mysql)" ]; then
-  echo "mysql 容器没在运行，先起服务："
-  echo "  docker compose --env-file .env $COMPOSE_ARGS up -d"
+# 连不上就提前说清楚，别等 mysqldump 抛一句难懂的报错
+if ! MYSQL_PWD="$APP_PW" mysql -h"$DB_HOST" -ugym -e "SELECT 1" >/dev/null 2>&1; then
+  echo "连不上宿主 MySQL（$DB_HOST:3306）。检查服务是否在跑、gym 账号口令是否与 .env 一致："
+  echo "  systemctl status mysql"
   exit 1
 fi
 
@@ -129,12 +131,10 @@ echo "==> 备份 $DB_NAME → $OUT"
 # set +e 是为了拿到 PIPESTATUS：pipefail 只知道“失败了”，不知道是 mysqldump 报错
 # 还是 gzip 写满磁盘，日志里分清楚才好排查
 set +e
-dc exec -T -e MYSQL_PWD="$ROOT_PW" mysql \
-  mysqldump -uroot \
+MYSQL_PWD="$APP_PW" mysqldump -h"$DB_HOST" -ugym \
     --single-transaction \
     --quick \
     --no-tablespaces \
-    --routines \
     --triggers \
     --events \
     --set-gtid-purged=OFF \
@@ -193,7 +193,7 @@ if [ "$INSTALL_CRON" -eq 1 ]; then
 fi
 
 echo
-echo "本机恢复："
-echo "  gunzip -c $OUT | docker compose --env-file .env $COMPOSE_ARGS exec -T mysql mysql -uroot -p"
+echo "本机恢复（会覆盖同名库的表）："
+echo "  gunzip -c $OUT | mysql -h$DB_HOST -ugym -p"
 echo "异地留一份（备份和数据库在同一块盘上，盘坏了会一起没）："
 echo "  scp $OUT <你的电脑>:$HOME/gym-backups/"

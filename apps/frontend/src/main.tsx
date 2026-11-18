@@ -154,6 +154,18 @@ async function api<T>(
 const report = (err: unknown): void => {
   void message.error(err instanceof Error ? err.message : "操作失败");
 };
+// 导入用的 JSON 同时接受两种写法：裸数组 [...] 和 {"items":[...]}
+function parseItems<T>(text: string): T[] | null {
+  try {
+    const v: unknown = JSON.parse(text);
+    if (Array.isArray(v)) return v as T[];
+    const wrap = v as { items?: unknown };
+    if (wrap && Array.isArray(wrap.items)) return wrap.items as T[];
+  } catch {
+    return null;
+  }
+  return null;
+}
 const blankDay = (): Day => ({
   Weekday: 1,
   Focus: "全身",
@@ -369,6 +381,10 @@ function ExerciseForm({
 function Console(): React.JSX.Element {
   const [logged, setLogged] = useState(false),
     [pwOpen, setPwOpen] = useState(false),
+    // 导入弹窗：importKind 决定往哪个接口推，importText 是选中的文件内容
+    [importKind, setImportKind] = useState<"exercises" | "plans" | null>(null),
+    [importText, setImportText] = useState(""),
+    [importName, setImportName] = useState(""),
     [page, setPage] = useState("训练模板"),
     [plans, setPlans] = useState<Plan[]>([]),
     [members, setMembers] = useState<Member[]>([]),
@@ -615,26 +631,96 @@ function Console(): React.JSX.Element {
             </Button>
           </Form>
         </Modal>
+        <Modal
+          open={!!importKind}
+          title={importKind === "plans" ? "导入训练模板" : "导入训练资料"}
+          okText="开始导入"
+          cancelText="取消"
+          destroyOnClose
+          okButtonProps={{
+            disabled: (parseItems<unknown>(importText)?.length ?? 0) === 0,
+          }}
+          onCancel={() => {
+            setImportKind(null);
+            setImportText("");
+            setImportName("");
+          }}
+          onOk={async () => {
+            const kind = importKind;
+            const items = parseItems<unknown>(importText);
+            if (!kind || !items || items.length === 0) {
+              message.error("JSON 解析失败或没有数据");
+              return;
+            }
+            try {
+              const r = await api<{
+                created: number;
+                skipped: number;
+                total: number;
+              }>(`/import/${kind}`, { items });
+              message.success(
+                `导入完成：新增 ${r.created} 条，跳过 ${r.skipped} 条`,
+              );
+              setImportKind(null);
+              setImportText("");
+              setImportName("");
+              // openPage 只刷新训练资料用的 catalog，模板表用的是 plans，
+              // 所以这里走整页刷新，两张表都能看到新数据
+              await refresh();
+              setPage(kind === "plans" ? "训练模板" : "训练资料");
+            } catch (e) {
+              report(e);
+            }
+          }}
+        >
+          <p className="dim">
+            选择一个 JSON 文件。训练资料是动作数组，训练模板是模板数组；已存在的条目会被跳过，不会覆盖。
+          </p>
+          <input
+            type="file"
+            accept=".json,application/json"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (!f) return;
+              void f
+                .text()
+                .then((t) => {
+                  setImportName(f.name);
+                  setImportText(t);
+                })
+                .catch(report);
+            }}
+          />
+          {importName && (
+            <p>
+              {importName}：可解析 {parseItems<unknown>(importText)?.length ?? 0}{" "}
+              条
+            </p>
+          )}
+        </Modal>
       </aside>
       <main>
         <h1>{page}</h1>
         {page === "训练模板" && (
           <>
-            <Button
-              type="primary"
-              onClick={() =>
-                setEdit({
-                  ID: 0,
-                  Revision: 0,
-                  Name: "",
-                  Published: false,
-                  Days: [blankDay()],
-                  Meta: blankMeta(),
-                })
-              }
-            >
-              新建周模板
-            </Button>
+            <Space wrap>
+              <Button
+                type="primary"
+                onClick={() =>
+                  setEdit({
+                    ID: 0,
+                    Revision: 0,
+                    Name: "",
+                    Published: false,
+                    Days: [blankDay()],
+                    Meta: blankMeta(),
+                  })
+                }
+              >
+                新建周模板
+              </Button>
+              <Button onClick={() => setImportKind("plans")}>导入</Button>
+            </Space>
             <Table
               rowKey="ID"
               dataSource={plans}
@@ -710,6 +796,7 @@ function Console(): React.JSX.Element {
                 onChange={(e) => setKw(e.target.value)}
               />
               <Button onClick={() => setEntry(emptyExercise())}>新增动作</Button>
+              <Button onClick={() => setImportKind("exercises")}>导入</Button>
             </Space>
             <Table
               rowKey="ID"

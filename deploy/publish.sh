@@ -5,7 +5,6 @@
 #   ./deploy/publish.sh user@1.2.3.4 --path /opt/gym
 #   ./deploy/publish.sh user@1.2.3.4 --config      # 首次部署，连 compose 和 .env 一起传
 #   ./deploy/publish.sh user@1.2.3.4 --config --env .env.production   # 传生产配置
-#   ./deploy/publish.sh user@1.2.3.4 --config --public  # 没有域名，用公网 IP:8080 访问后台
 #   ./deploy/publish.sh user@1.2.3.4 --skip-build  # 复用上次的 tar
 #
 # 设计取舍：
@@ -24,7 +23,6 @@ REMOTE_PATH="/opt/gym"
 ENV_SRC=".env"
 SKIP_BUILD=0
 SYNC_CONFIG=0
-PUBLIC=0
 REMOTE=""
 
 usage() {
@@ -36,8 +34,6 @@ usage() {
   --config       同时上传 compose、.env，以及 deploy/certs 里备好的证书（首次部署用）
   --env <file>   配合 --config 指定上传哪份配置，默认 .env
                  生产部署用 --env .env.production（由 .env.production.example 复制而来）
-  --public       上传并启用公网 IP 访问（web 暴露到 0.0.0.0:8080）
-                 没有域名、只能用 IP 打开后台时用；之后接入 HTTPS 就去掉
   --skip-build   跳过构建，直接发布已有的 deploy/dist/gym-images.tar
   -h, --help     显示帮助
 EOF
@@ -78,7 +74,6 @@ while [ $# -gt 0 ]; do
     --path)       [ -n "${2:-}" ] || { echo "--path 缺少参数"; exit 1; }; REMOTE_PATH="$2"; shift 2 ;;
     --env)        [ -n "${2:-}" ] || { echo "--env 缺少参数"; exit 1; }; ENV_SRC="$2"; shift 2 ;;
     --config)     SYNC_CONFIG=1; shift ;;
-    --public)     PUBLIC=1; shift ;;
     --skip-build) SKIP_BUILD=1; shift ;;
     -h|--help)    usage; exit 0 ;;
     -*)           echo "未知参数: $1"; usage; exit 1 ;;
@@ -144,22 +139,10 @@ else
   fi
 fi
 
-# 公网 IP 访问是显式开关：只有带 --public 才把叠加文件放上去。
-# 文件一旦存在于服务器，后续每次发布都会自动带上它（见下面的检测），
-# 否则一次普通发布就会把 8080 悄悄收回，变成"公网又打不开了"。
-if [ "$PUBLIC" -eq 1 ]; then
-  echo "==> 启用公网 IP 访问（web → 0.0.0.0:8080）"
-  scp "$ROOT/deploy/docker-compose.public.yml" "$REMOTE:$REMOTE_PATH/deploy/docker-compose.public.yml"
-fi
-
 # 服务器上已启用 HTTPS 时自动带上叠加文件。
 # 只跑基础 compose 会重建 web 容器，把 80/443 和证书挂载一起丢掉——这种"发布完 https 没了"
 # 的故障排查成本很高，所以按文件存在与否判断，而不是要求每次都记得加参数
 COMPOSE_ARGS="-f $COMPOSE"
-if ssh "$REMOTE" "test -f '$REMOTE_PATH/deploy/docker-compose.public.yml'"; then
-  COMPOSE_ARGS="$COMPOSE_ARGS -f deploy/docker-compose.public.yml"
-  echo "==> 检测到公网 IP 访问配置，web 同时监听 0.0.0.0:8080"
-fi
 if ssh "$REMOTE" "test -f '$REMOTE_PATH/deploy/docker-compose.https.yml'"; then
   COMPOSE_ARGS="$COMPOSE_ARGS -f deploy/docker-compose.https.yml"
   echo "==> 检测到 HTTPS 叠加配置，按 80/443 方式启动"
@@ -172,7 +155,9 @@ echo "==> 服务器加载镜像"
 ssh "$REMOTE" 'docker load -i /tmp/gym-images.tar && rm -f /tmp/gym-images.tar'
 
 echo "==> 重建并启动服务"
-ssh "$REMOTE" "set -e; cd '$REMOTE_PATH' && docker compose --env-file .env $COMPOSE_ARGS up -d"
+# --remove-orphans：compose 里已经没有 mysql 服务了，但不加这个参数，服务器上残留的
+# 旧 mysql 容器会继续占着 197MB 内存跑，而且看起来"一切正常"
+ssh "$REMOTE" "set -e; cd '$REMOTE_PATH' && docker compose --env-file .env $COMPOSE_ARGS up -d --remove-orphans"
 
 echo "==> 服务状态"
 ssh "$REMOTE" "cd '$REMOTE_PATH' && docker compose --env-file .env $COMPOSE_ARGS ps"

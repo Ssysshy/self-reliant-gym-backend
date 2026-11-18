@@ -218,7 +218,7 @@ func Run() {
 	if e = migrations.Run(db); e != nil {
 		log.Fatal(e)
 	}
-	seed()
+	// 内置动作与模板不再自动导入，需要时用后台「导入」按钮推 seed/*.json
 	// 迁移只给 users 加了 code 列，老用户的编号在这里补
 	ensureCodes()
 	r := gin.New()
@@ -264,6 +264,9 @@ func Run() {
 	a.POST("/login", staffLogin)
 	a.Use(staffAuth)
 	a.POST("/password", changePassword)
+	// 批量导入：内置数据在 seed/*.json，运营侧改完可以直接推一份上来
+	a.POST("/import/exercises", importExercises)
+	a.POST("/import/plans", importPlans)
 	a.GET("/me", func(c *gin.Context) { c.JSON(200, gin.H{"admin": c.GetBool("admin")}) })
 	a.POST("/orders/:id/reconcile", reconcile)
 	u.POST("/orders/:id/reconcile", reconcile)

@@ -54,6 +54,26 @@ docker image inspect "$API_IMAGE" --format '    api={{.Architecture}}/{{.Os}} si
 docker image inspect "$WEB_IMAGE" --format '    web={{.Architecture}}/{{.Os}} size={{.Size}}'
 ls -lh "$TAR" | sed 's/^/    /'
 
+# 同时归档一份带时间戳的副本到 base/，回滚时直接拿来 load，不必重新构建。
+# 文件名精确到分钟（gym-images-202611171046.tar）：同一分钟内重复构建会覆盖，
+# 不影响使用，但想留两个版本就隔一分钟再跑。
+ARCHIVE="$ROOT/base"
+mkdir -p "$ARCHIVE"
+SAVED="$ARCHIVE/gym-images-$(date +%Y%m%d%H%M).tar"
+cp "$TAR" "$SAVED"
+echo
+echo "    已归档：base/$(basename "$SAVED")"
+ls -lh "$SAVED" | sed 's/^/    /'
+
+# 只保留最近 10 个，避免 base/ 无限膨胀（每个约 42M，10 个约 420M）
+# 按修改时间倒序排，从第 11 个开始删；没有多余文件时整段跳过
+KEEP=10
+STALE="$(ls -t "$ARCHIVE"/gym-images-*.tar 2>/dev/null | tail -n +$((KEEP + 1)))"
+if [ -n "$STALE" ]; then
+  echo "$STALE" | xargs rm -f
+  echo "    已清理 $(printf '%s\n' "$STALE" | wc -l | tr -d ' ') 个旧归档，保留最近 $KEEP 个"
+fi
+
 cat <<EOF
 
 已生成 ${TAR}，拷到服务器执行：

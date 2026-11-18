@@ -1,54 +1,38 @@
-# 部署编排。在仓库根目录执行：
-#   docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
-# --env-file 提供 ${MYSQL_PASSWORD} 等插值，同时作为容器运行时的 env_file（相对本文件指向 ../.env）
-# name 固定项目名，避免文件搬家后网络名/卷名变成 deploy_*
+# 单文件部署编排。在仓库根目录执行：
+#   docker compose --env-file .env -f deploy/docker-compose.yml up -d
+#
+# 这套编排对应已经定下来的架构，不再靠叠加文件切换：
+#   - 数据库在宿主机上（不是容器），api 通过 host.docker.internal 连它
+#   - web 同时监听 0.0.0.0:8080（公网 IP 打开后台）和 127.0.0.1:18080（SSH 隧道调试）
+#
+# 唯一保留的叠加文件是 docker-compose.https.yml —— 它依赖证书文件存在，没法并进来
+# （没有证书时挂上 nginx.https.conf，nginx 会直接起不来）。
+#
+# name 固定项目名，避免文件搬家后网络名变成 deploy_*
 name: self-reliant-gym-backend
-# 按 2C2G 机器配的内存预算（宿主机系统 + dockerd 约 350MB，容器合计上限 832MB，
-# 留 800MB 左右给文件缓存）。改大任何一项之前先确认 free -h 还有余量。
+# 内存预算（1.7G 机器）：宿主机系统 + dockerd 约 350MB，容器合计 192MB，
+# 剩下的留给宿主 MySQL 和文件缓存。改大任何一项前先看 free -h。
 services:
-  mysql:
-    image: mysql:8.4
-    # mysqld 必须写全：mysql 官方镜像的 ENTRYPOINT 是 docker-entrypoint.sh，
-    # command 会整体替换默认的 CMD ["mysqld"]。
-    command:
-      - mysqld
-      # 性能采集对本项目没有意义，关掉能省 100MB 以上常驻内存
-      - --performance-schema=OFF
-      # 8.4 默认就是 128M，写出来是为了防止未来版本改动默认值时被悄悄放大
-      - --innodb-buffer-pool-size=128M
-      # 默认 151 个连接，每个连接都有线程栈和缓冲区；小程序 + 后台撑不到 50
-      - --max-connections=50
-      # 只按 IP/服务名连接，跳过反查主机名，省 DNS 开销
-      - --skip-name-resolve
-    mem_limit: 640m
-    environment:
-      MYSQL_DATABASE: gym
-      MYSQL_USER: gym
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?.env 缺少 MYSQL_PASSWORD}
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?.env 缺少 MYSQL_ROOT_PASSWORD}
-    volumes:
-      - gym-data:/var/lib/mysql
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-    # 只在容器网络内可达；宿主机仍用本机 MySQL，不抢 3306
-    expose:
-      - "3306"
   api:
     build: {context: .., target: api, dockerfile: deploy/Dockerfile}
+    # 数据库在容器外，没有 depends_on 保证它先就绪：api 启动时若连不上库，
+    # 迁移会失败退出，没有 restart 策略容器就一直躺着。
+    restart: unless-stopped
     mem_limit: 128m
     env_file: ../.env
     environment:
-      # 容器内走服务名连接，覆盖 .env 里给宿主机 go run 用的 127.0.0.1
-      MYSQL_DSN: gym:${MYSQL_PASSWORD}@tcp(mysql:3306)/gym?charset=utf8mb4&parseTime=true&loc=UTC
-    depends_on:
-      mysql: {condition: service_healthy}
+      # 值来自 .env；换云数据库只改那一行，这里不用动
+      MYSQL_DSN: ${MYSQL_DSN:?.env 里缺少 MYSQL_DSN}
+    # 容器内的 host.docker.internal 解析到 docker0 网关（172.17.0.1）
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
   web:
     build: {context: .., target: web, dockerfile: deploy/Dockerfile}
+    restart: unless-stopped
     mem_limit: 64m
-    ports: ["127.0.0.1:18080:80"]
+    ports:
+      # 8080 对公网，没有域名时用 IP:8080 打开后台
+      - "0.0.0.0:8080:80"
+      # 只绑本机，SSH 隧道调试用；与 8080 不冲突
+      - "127.0.0.1:18080:80"
     depends_on: [api]
-volumes:
-  gym-data:
