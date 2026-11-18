@@ -156,6 +156,82 @@ func cardOf(e Encouragement) encouragementCard {
 	return encouragementCard{ID: e.ID, Text: e.Text, Author: e.Author}
 }
 
+// pushNow 把指定的一句手动设为今日推送，和当天的自动抽签抢同一把锁。
+//
+// 原本今天那条退回「未推送」而不是「已推送」：运营手动换一条，通常是想马上换掉今天的内容，
+// 被换下的那句还值得在后面某天再推，不该因为被顶替就整轮报废。
+func pushNow(c *gin.Context) {
+	if !c.GetBool("admin") {
+		fail(c, 403, "需要管理员权限")
+		return
+	}
+	id, e := strconv.ParseUint(c.Param("id"), 10, 32)
+	if e != nil {
+		fail(c, 400, "文案无效")
+		return
+	}
+	today := todayCST()
+	var row Encouragement
+	e = db.Connection(func(conn *gorm.DB) error {
+		fresh := func() *gorm.DB { return conn.Session(&gorm.Session{}) }
+		var got int
+		if e := conn.Raw("SELECT GET_LOCK('gym_encourage_today', 5)").Scan(&got).Error; e != nil {
+			return e
+		}
+		if got != 1 {
+			return errEncourageBusy
+		}
+		defer conn.Exec("SELECT RELEASE_LOCK('gym_encourage_today')")
+		return conn.Transaction(func(tx *gorm.DB) error {
+			if e := tx.First(&row, "id = ?", id).Error; e != nil {
+				return e
+			}
+			if !row.Enabled {
+				return invalid("先启用这句，再设为今日推送")
+			}
+			// 已经是今天这条：什么都不用改，也不写审计
+			if row.ServedOn != nil && row.ServedOn.Format("2006-01-02") == today {
+				return nil
+			}
+			// 先让出今日位，再占上去。顺序不能反：served_on 上有唯一索引
+			var old Encouragement
+			if e := fresh().Where("served_on = ? AND id <> ?", today, row.ID).Limit(1).Find(&old).Error; e != nil {
+				return e
+			}
+			if old.ID != 0 {
+				if e := tx.Model(&Encouragement{}).Where("id = ?", old.ID).Update("served_on", nil).Error; e != nil {
+					return e
+				}
+			}
+			if e := tx.Model(&Encouragement{}).Where("id = ?", row.ID).Updates(map[string]any{
+				"served_on": today, "last_served": today,
+			}).Error; e != nil {
+				return e
+			}
+			action := "指定今日推送「" + row.Text + "」"
+			if old.ID != 0 {
+				action += "，原「" + old.Text + "」退回未推送"
+			}
+			return tx.Create(&Audit{Actor: c.GetString("actor"), Action: action, Target: row.ID}).Error
+		})
+	})
+	if e != nil {
+		if errors.Is(e, errEncourageBusy) {
+			fail(c, 503, e.Error())
+			return
+		}
+		result(c, nil, e)
+		return
+	}
+	// 事务里只写了两列，回读一次拿到最新的 served_on/last_served，再把状态算出来
+	if e := db.First(&row, "id = ?", id).Error; e != nil {
+		save(c, nil, e)
+		return
+	}
+	fillStatus(&row, todayCST())
+	c.JSON(200, row)
+}
+
 // checkEncouragement 校验文案与落款，返回空串表示通过。
 func checkEncouragement(text, author string) string {
 	n := len([]rune(text))
@@ -337,6 +413,8 @@ func encouragementRoutes(g, a *gin.RouterGroup) {
 		}
 		result(c, row, e)
 	})
+	// 手动指定今天推哪条（新建完想立刻用上、或今天这条不合适时用）
+	a.POST("/encouragements/:id/push", pushNow)
 	a.DELETE("/encouragements/:id", func(c *gin.Context) {
 		if !c.GetBool("admin") {
 			fail(c, 403, "需要管理员权限")

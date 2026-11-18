@@ -649,6 +649,13 @@ function Console(): React.JSX.Element {
         </Form>
       </main>
     );
+  // 鼓励语页的三块派生信息：今日推送是哪条、本轮还剩几条、共有几条启用。
+  // 全部由列表算出来，不额外请求。
+  const todayEncouragement = encouragements.find((e) => e.Status === "今日推送");
+  const enabledEncouragements = encouragements.filter((e) => e.Enabled);
+  const unpushedCount = enabledEncouragements.filter(
+    (e) => e.Status === "未推送",
+  ).length;
   return (
     <div className="layout">
       <aside>
@@ -987,11 +994,15 @@ function Console(): React.JSX.Element {
               </span>
             </Space>
             <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
-              本轮还剩{" "}
-              {encouragements.filter((e) => e.Enabled && e.Status === "未推送")
-                .length}{" "}
-              条未推 / 共 {encouragements.filter((e) => e.Enabled).length}{" "}
-              条启用；整轮推完会自动清空本轮重新开始，上次推送日期保留在状态右侧。
+              今日推送：
+              {todayEncouragement
+                ? todayEncouragement.Text
+                : "还没抽（下一个进入小程序的用户会触发）"}
+              ；本轮还剩 {unpushedCount} 条未推 / 共{" "}
+              {enabledEncouragements.length} 条启用
+            </div>
+            <div style={{ fontSize: 12, color: "#aaa", marginBottom: 4 }}>
+              整轮推完会自动清空本轮重新开始，上次推送日期保留在状态右侧；全部放回「未推送」等于提前开新一轮。想指定今天推哪条，用行尾的「设为今日推送」，原来那条会退回未推送。
             </div>
             <Table
               rowKey="ID"
@@ -1031,21 +1042,63 @@ function Console(): React.JSX.Element {
                 { title: "排序", dataIndex: "Sort", width: 70 },
                 {
                   title: "",
-                  width: 230,
+                  width: 340,
                   render: (_: unknown, e: Encouragement) => (
                     <Space size={4}>
-                      <Button disabled={!admin} onClick={() => setEncourage(e)}>
+                      {e.Enabled && e.Status !== "今日推送" && (
+                        <Button
+                          type="primary"
+                          size="small"
+                          disabled={!admin}
+                          onClick={() =>
+                            Modal.confirm({
+                              title: "设为今日推送？",
+                              content: todayEncouragement
+                                ? `小程序今天会改成这句；原来那条「${todayEncouragement.Text}」退回未推送，之后还能被抽到。`
+                                : "今天还没抽过，小程序会直接推这句。",
+                              okText: "设为今日推送",
+                              onOk: async () => {
+                                try {
+                                  await api(
+                                    "/encouragements/" + e.ID + "/push",
+                                    {},
+                                    "POST",
+                                  );
+                                  await openPage("鼓励语");
+                                } catch (err) {
+                                  report(err);
+                                }
+                              },
+                            })
+                          }
+                        >
+                          设为今日推送
+                        </Button>
+                      )}
+                      <Button
+                        size="small"
+                        disabled={!admin}
+                        onClick={() => setEncourage(e)}
+                      >
                         编辑
                       </Button>
                       {e.Status !== "未推送" && (
                         <Button
+                          size="small"
                           disabled={!admin}
-                          onClick={() =>
+                          onClick={() => {
+                            // 放回今天这条时，如果本轮没有别的未推文案，池子里就剩它自己，
+                            // 下次抽签还是它 —— 这不是 bug，但点了会以为没生效，得提前讲清楚。
+                            const alone =
+                              e.Status === "今日推送" && unpushedCount === 0;
                             Modal.confirm({
                               title: "放回未推送？",
-                              content:
-                                "放回后这句会重新排队，今天这条会空出来，下一个进入小程序的用户会看到新抽的一条。",
-                              okText: "放回",
+                              content: alone
+                                ? "本轮其它文案都已经推过，放回后池子里只剩它自己，下一条仍然是它。想今天就换一条，请把这条「停用」（会立刻让出今日位、重新抽一条），或者直接改文案。"
+                                : e.Status === "今日推送"
+                                  ? "今天这条会空出来，下一个进入小程序的用户会从其它未推送文案里抽一条。"
+                                  : "放回后这句重新排队，本轮可能再次被抽到。",
+                              okText: alone ? "仍然放回" : "放回",
                               onOk: async () => {
                                 try {
                                   await api(
@@ -1058,14 +1111,15 @@ function Console(): React.JSX.Element {
                                   report(err);
                                 }
                               },
-                            })
-                          }
+                            });
+                          }}
                         >
                           放回未推送
                         </Button>
                       )}
                       <Button
                         danger
+                        size="small"
                         disabled={!admin}
                         onClick={() =>
                           Modal.confirm({
