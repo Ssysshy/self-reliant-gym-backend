@@ -2,6 +2,8 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
@@ -124,4 +126,46 @@ func importPlans(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"created": r.Created, "skipped": r.Skipped, "total": len(items)})
+}
+
+// 导出的 JSON 和 seed/*.json 结构完全一致，可以直接拿去另一个环境导入。
+// 文件名带日期，方便区分版本。
+func exportFile(c *gin.Context, name string, rows any) {
+	c.Header("Content-Disposition",
+		fmt.Sprintf(`attachment; filename="%s-%s.json"`, name, time.Now().Format("20060102")))
+	c.JSON(200, rows)
+}
+
+// exportExercises 导出全部动作，按 ID 升序，保证两次导出结果稳定可比。
+func exportExercises(c *gin.Context) {
+	if !c.GetBool("admin") {
+		fail(c, 403, "需要管理员权限")
+		return
+	}
+	var rows []Exercise
+	if e := db.Order("id").Find(&rows).Error; e != nil {
+		save(c, nil, e)
+		return
+	}
+	exportFile(c, "exercises", rows)
+}
+
+// exportPlans 只导出官方模板（owner=0）。owner 非 0 的是用户自己存的计划，
+// 不属于运营数据，导出会带出一堆用户数据，没有意义。
+// 加 ?all=1 可以连用户计划一起导（排查问题时偶尔要用）。
+func exportPlans(c *gin.Context) {
+	if !c.GetBool("admin") {
+		fail(c, 403, "需要管理员权限")
+		return
+	}
+	q := db.Order("id")
+	if c.Query("all") != "1" {
+		q = q.Where("owner = 0")
+	}
+	var rows []Plan
+	if e := q.Find(&rows).Error; e != nil {
+		save(c, nil, e)
+		return
+	}
+	exportFile(c, "plans", rows)
 }

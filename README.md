@@ -236,28 +236,39 @@ docker tag docker.1ms.run/library/nginx:alpine nginx:alpine
 docker cp $(docker ps -qf name=api):/app/seed/exercises.json .
 ```
 
-### 导入接口
+### 导入与导出
 
-后台的导入入口：
+界面上，「训练资料」「训练模板」两页各有一组**导入 / 导出**按钮：
 
-- 界面：「训练资料」「训练模板」页的**导入**按钮，选 JSON 文件即可
-- 接口：`POST /api/admin/v1/import/exercises` 和 `/import/plans`，需管理员账号
+- **导入**：选 JSON 文件推送，弹窗里先显示能解析多少条
+- **导出**：浏览器直接下载 `exercises-20261118.json` / `plans-20261118.json`，结构和 `seed/*.json` 一致，可以原样拿去另一个环境导入
 
-请求体两种写法都接受：
+接口层面，都需要管理员账号：
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/admin/v1/import/exercises` | 导入动作 |
+| POST | `/api/admin/v1/import/plans` | 导入模板 |
+| GET | `/api/admin/v1/export/exercises` | 导出全部动作（按 ID 升序） |
+| GET | `/api/admin/v1/export/plans` | 导出官方模板（`owner=0`）；加 `?all=1` 连用户计划一起导 |
+
+导入的请求体两种写法都接受：
 
 ```bash
 curl -X POST http://127.0.0.1:8080/api/admin/v1/import/exercises \
   -H 'Content-Type: application/json' -H 'X-Gym-Admin: 1' \
   --cookie 'gym_admin=...' \
-  -d @seed/exercises.json            # 裸数组
+  -d @seed/exercises.json            # 裸数组，也可以是 {"items":[...]}
 ```
 
-也接受 `{"items":[...]}`。响应是 `{"created":n,"skipped":n,"total":n}`。
+响应是 `{"created":n,"skipped":n,"total":n}`。
 
 两条注意：
 
 - **模板不带 `ID` 时每次都新建一条**，重复导入同一份文件会产生多份。要幂等就在 JSON 里写上 `ID`
 - 导入的动作/模板不会覆盖已有记录，内容要改走后台编辑
+
+跨环境搬运营数据的完整流程：源环境「导出」→ 目标环境「导入」。**先动作后模板**，因为模板按动作名引用。
 
 ## 1.7G 机器的内存调优
 

@@ -267,11 +267,15 @@ func Run() {
 	// 批量导入：内置数据在 seed/*.json，运营侧改完可以直接推一份上来
 	a.POST("/import/exercises", importExercises)
 	a.POST("/import/plans", importPlans)
+	// 导出成 JSON 下载，方便跨环境搬运运营数据
+	a.GET("/export/exercises", exportExercises)
+	a.GET("/export/plans", exportPlans)
 	a.GET("/me", func(c *gin.Context) { c.JSON(200, gin.H{"admin": c.GetBool("admin")}) })
 	a.POST("/orders/:id/reconcile", reconcile)
 	u.POST("/orders/:id/reconcile", reconcile)
 	a.GET("/orders", orders)
 	catalogProducts(u, a)
+	encouragementRoutes(api, a)
 	staffGrants(a)
 	registerAdmin(a)
 	go watchOrders()

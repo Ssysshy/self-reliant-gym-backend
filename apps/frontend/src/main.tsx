@@ -100,6 +100,18 @@ interface Member {
   Experience: string;
   Expires: string;
 }
+// 首页鼓励弹窗的文案。后台每天从「未推送」里随机挑一条作为「今日推送」，小程序只拿这一条；
+// 第二天它自动变成「已推送」，再从剩下的未推送里抽。Status / Served 由后端按推送日期现算，不落库。
+interface Encouragement {
+  ID: number;
+  Text: string;
+  Author: string;
+  Enabled: boolean;
+  Sort: number;
+  Status: string;
+  Served: string;
+  CreatedAt: string;
+}
 interface Exercise {
   ID: number;
   Name: string;
@@ -154,6 +166,23 @@ async function api<T>(
 const report = (err: unknown): void => {
   void message.error(err instanceof Error ? err.message : "操作失败");
 };
+// 导出用的下载：接口返回 Content-Disposition，这里取文件名后触发浏览器保存
+async function download(path: string): Promise<void> {
+  const r = await fetch("/api/admin/v1" + path, {
+    headers: { "X-Gym-Admin": "1" },
+  });
+  if (!r.ok) {
+    if (r.status === 401) window.dispatchEvent(new Event("expired"));
+    throw new Error(r.status === 403 ? "需要管理员权限" : "导出失败");
+  }
+  const m = /filename="([^"]+)"/.exec(r.headers.get("Content-Disposition") || "");
+  const url = URL.createObjectURL(await r.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = m ? m[1] : "export.json";
+  a.click();
+  URL.revokeObjectURL(url);
+}
 // 导入用的 JSON 同时接受两种写法：裸数组 [...] 和 {"items":[...]}
 function parseItems<T>(text: string): T[] | null {
   try {
@@ -260,6 +289,79 @@ function ProductForm({
       >
         <Input allowClear placeholder="留空用环境变量" />
       </Form.Item>
+      <Button type="primary" htmlType="submit">
+        {isNew ? "新增" : "保存"}
+      </Button>
+    </Form>
+  );
+}
+
+// 鼓励语表单：新增与编辑共用。文案在弹窗里居中等宽展示，所以按字数给上限提示。
+function EncouragementForm({
+  entry,
+  onDone,
+}: {
+  entry: Encouragement | "new";
+  onDone: () => void;
+}): React.JSX.Element {
+  const isNew = entry === "new";
+  return (
+    <Form
+      key={isNew ? "new" : entry.ID}
+      layout="vertical"
+      initialValues={
+        isNew ? { Text: "", Author: "撸铁不求人", Sort: 10, Enabled: true } : entry
+      }
+      onFinish={async (v: {
+        Text: string;
+        Author?: string;
+        Sort?: number;
+        Enabled?: boolean;
+      }) => {
+        try {
+          const body = {
+            Text: v.Text,
+            Author: v.Author || "",
+            Sort: Number(v.Sort ?? 0),
+            Enabled: !!v.Enabled,
+          };
+          if (isNew) await api("/encouragements", body);
+          else await api("/encouragements/" + entry.ID, body, "PUT");
+          onDone();
+        } catch (e) {
+          report(e);
+        }
+      }}
+    >
+      <Form.Item
+        name="Text"
+        label="鼓励语"
+        rules={[{ required: true, message: "请填写鼓励语" }]}
+        extra="弹窗里居中展示，建议 20~40 个字，最多 80 个字"
+      >
+        <Input.TextArea
+          rows={3}
+          maxLength={80}
+          showCount
+          placeholder="例：进步不是每次都加重量，而是每次都来。"
+        />
+      </Form.Item>
+      <Space size="large" align="start">
+        <Form.Item name="Author" label="落款" extra="留空则不显示这一行">
+          <Input maxLength={16} placeholder="撸铁不求人" />
+        </Form.Item>
+        <Form.Item name="Sort" label="排序" extra="小的排在前面">
+          <InputNumber min={-9999} max={9999} />
+        </Form.Item>
+        <Form.Item
+          name="Enabled"
+          label="启用"
+          valuePropName="checked"
+          extra="停用即退出今日推送位"
+        >
+          <Switch />
+        </Form.Item>
+      </Space>
       <Button type="primary" htmlType="submit">
         {isNew ? "新增" : "保存"}
       </Button>
@@ -402,6 +504,9 @@ function Console(): React.JSX.Element {
     [products, setProducts] = useState<Product[]>([]),
     // 正在编辑的档位："new" 是新增，Product 是编辑，null 表示弹窗关闭
     [product, setProduct] = useState<Product | "new" | null>(null),
+    // 首页鼓励弹窗的文案，以及正在编辑的那条（"new" 是新增）
+    [encouragements, setEncouragements] = useState<Encouragement[]>([]),
+    [encourage, setEncourage] = useState<Encouragement | "new" | null>(null),
     [admin, setAdmin] = useState(false),
     [audit, setAudit] = useState<Audit[]>([]),
     [catalog, setCatalog] = useState<Exercise[]>([]),
@@ -448,6 +553,8 @@ function Console(): React.JSX.Element {
   async function openPage(p: string): Promise<void> {
     if (p === "操作记录") setAudit(await api<Audit[]>("/audit"));
     if (p === "会员套餐") setProducts(await api<Product[]>("/products"));
+    if (p === "鼓励语")
+      setEncouragements(await api<Encouragement[]>("/encouragements"));
     if (p === "会员订单") setOrderRows(await api<Order[]>("/orders"));
     if (p === "会员管理") await loadMembers();
     if (p === "用户反馈") await loadFeedbacks(fbStatus);
@@ -550,6 +657,7 @@ function Console(): React.JSX.Element {
         {[
           "训练模板",
           "训练资料",
+          "鼓励语",
           "会员管理",
           "会员套餐",
           "会员订单",
@@ -720,6 +828,9 @@ function Console(): React.JSX.Element {
                 新建周模板
               </Button>
               <Button onClick={() => setImportKind("plans")}>导入</Button>
+              <Button onClick={() => void download("/export/plans").catch(report)}>
+                导出
+              </Button>
             </Space>
             <Table
               rowKey="ID"
@@ -797,6 +908,11 @@ function Console(): React.JSX.Element {
               />
               <Button onClick={() => setEntry(emptyExercise())}>新增动作</Button>
               <Button onClick={() => setImportKind("exercises")}>导入</Button>
+              <Button
+                onClick={() => void download("/export/exercises").catch(report)}
+              >
+                导出
+              </Button>
             </Space>
             <Table
               rowKey="ID"
@@ -854,6 +970,149 @@ function Console(): React.JSX.Element {
                 },
               ]}
             />
+          </>
+        )}
+        {page === "鼓励语" && (
+          <>
+            <Space style={{ marginBottom: 16 }} wrap>
+              <Button
+                type="primary"
+                disabled={!admin}
+                onClick={() => setEncourage("new")}
+              >
+                新增文案
+              </Button>
+              <span style={{ color: "#999" }}>
+                每天从「未推送」里随机挑一条作为今日推送，小程序拿到的就是这一条（每天最多弹两次）；第二天它自动变成「已推送」，再从剩下的里抽下一条。当天第一个用户进入小程序时才会抽出今天这条。
+              </span>
+            </Space>
+            <div style={{ fontSize: 12, color: "#888", marginBottom: 4 }}>
+              本轮还剩{" "}
+              {encouragements.filter((e) => e.Enabled && e.Status === "未推送")
+                .length}{" "}
+              条未推 / 共 {encouragements.filter((e) => e.Enabled).length}{" "}
+              条启用；整轮推完会自动清空本轮重新开始，上次推送日期保留在状态右侧。
+            </div>
+            <Table
+              rowKey="ID"
+              dataSource={encouragements}
+              locale={{ emptyText: "还没有文案，点「新增文案」写一句" }}
+              pagination={{ pageSize: 20, hideOnSinglePage: true }}
+              columns={[
+                { title: "鼓励语", dataIndex: "Text" },
+                {
+                  title: "落款",
+                  dataIndex: "Author",
+                  width: 130,
+                  render: (v: string) => v || "-",
+                },
+                {
+                  title: "状态",
+                  width: 170,
+                  render: (_: unknown, e: Encouragement) => (
+                    <Space size={4}>
+                      <Tag
+                        color={
+                          e.Status === "今日推送"
+                            ? "green"
+                            : e.Status === "已推送"
+                              ? "blue"
+                              : "default"
+                        }
+                      >
+                        {e.Status}
+                      </Tag>
+                      {e.Served && (
+                        <span className="dim">上次 {e.Served.slice(5)}</span>
+                      )}
+                    </Space>
+                  ),
+                },
+                { title: "排序", dataIndex: "Sort", width: 70 },
+                {
+                  title: "",
+                  width: 230,
+                  render: (_: unknown, e: Encouragement) => (
+                    <Space size={4}>
+                      <Button disabled={!admin} onClick={() => setEncourage(e)}>
+                        编辑
+                      </Button>
+                      {e.Status !== "未推送" && (
+                        <Button
+                          disabled={!admin}
+                          onClick={() =>
+                            Modal.confirm({
+                              title: "放回未推送？",
+                              content:
+                                "放回后这句会重新排队，今天这条会空出来，下一个进入小程序的用户会看到新抽的一条。",
+                              okText: "放回",
+                              onOk: async () => {
+                                try {
+                                  await api(
+                                    "/encouragements/" + e.ID,
+                                    { Reset: true },
+                                    "PUT",
+                                  );
+                                  await openPage("鼓励语");
+                                } catch (err) {
+                                  report(err);
+                                }
+                              },
+                            })
+                          }
+                        >
+                          放回未推送
+                        </Button>
+                      )}
+                      <Button
+                        danger
+                        disabled={!admin}
+                        onClick={() =>
+                          Modal.confirm({
+                            title: "删除这句文案？",
+                            content:
+                              "删掉后不再参与轮转；已经推过的那天在操作记录里还查得到。",
+                            okText: "删除",
+                            okButtonProps: { danger: true },
+                            onOk: async () => {
+                              try {
+                                await api(
+                                  "/encouragements/" + e.ID,
+                                  undefined,
+                                  "DELETE",
+                                );
+                                await openPage("鼓励语");
+                              } catch (err) {
+                                report(err);
+                              }
+                            },
+                          })
+                        }
+                      >
+                        删除
+                      </Button>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+            <Modal
+              open={!!encourage}
+              title={encourage === "new" ? "新增文案" : "编辑文案"}
+              footer={null}
+              destroyOnClose
+              onCancel={() => setEncourage(null)}
+            >
+              {encourage && (
+                <EncouragementForm
+                  entry={encourage}
+                  onDone={async () => {
+                    setEncourage(null);
+                    await openPage("鼓励语");
+                  }}
+                />
+              )}
+            </Modal>
           </>
         )}
         {page === "会员套餐" && (
