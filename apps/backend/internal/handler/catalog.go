@@ -69,6 +69,17 @@ func contains(list []string, v string) bool {
 	return false
 }
 
+// imagePath 校验示范图地址。库里只存相对路径（/assets/exercises/x.png），
+// 域名由前端的 CDN 前缀统一拼，换 CDN 不用改数据；老数据里的 https 完整链接照样收。
+// http 不给过：正式版真机上 <image> 会被微信拦，填了也显示不出来。
+func imagePath(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" || strings.HasPrefix(v, "https://") {
+		return true
+	}
+	return !strings.Contains(v, "://")
+}
+
 // exerciseQuery 把列表筛选条件翻译成 SQL：部位、细分、器材分类和关键词互不干扰。
 func exerciseQuery(muscle, sub, category, keyword string) *gorm.DB {
 	q := db.Order("id")

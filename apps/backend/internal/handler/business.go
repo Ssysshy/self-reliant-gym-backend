@@ -99,6 +99,28 @@ func registerPlans(g *gin.RouterGroup) {
 		e := db.Where("owner=?", uid(c)).Order("id desc").Find(&v).Error
 		save(c, v, e)
 	})
+	// 切换当前计划：只改 users.active，不动计划内容。
+	// 保存在库里的计划可以有多份（免费 1 / 会员 6），但训练的永远是其中一份，
+	// 计划库页面上只展示当前这份，换一份走这个接口。
+	g.PUT("/plans/:id/active", func(c *gin.Context) {
+		id, e := strconv.Atoi(c.Param("id"))
+		if e != nil {
+			fail(c, 400, "计划无效")
+			return
+		}
+		e = db.Transaction(func(tx *gorm.DB) error {
+			var p Plan
+			if e := tx.Where("owner=? AND id=?", uid(c), id).First(&p).Error; e != nil {
+				return e
+			}
+			return tx.Model(&User{}).Where("id=?", uid(c)).Update("active", p.ID).Error
+		})
+		if e != nil {
+			save(c, nil, e)
+			return
+		}
+		c.JSON(200, gin.H{"Active": uint(id)})
+	})
 	g.POST("/plans", func(c *gin.Context) {
 		var in struct {
 			Operation                  string
@@ -429,8 +451,8 @@ func registerAdmin(g *gin.RouterGroup) {
 			fail(c, 400, msg)
 			return
 		}
-		if x.ImageURL != "" && !strings.HasPrefix(x.ImageURL, "https://") {
-			fail(c, 400, "教学图须使用 HTTPS 地址")
+		if !imagePath(x.ImageURL) {
+			fail(c, 400, "示范图请填相对路径或 https 地址")
 			return
 		}
 		if x.ID != 0 {

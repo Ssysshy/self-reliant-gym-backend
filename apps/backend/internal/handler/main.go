@@ -26,6 +26,8 @@ type User struct {
 	Expires    time.Time `gorm:"type:datetime;default:null"`
 	// Code 是落库的用户编号（见 code.go）：注册时写入，存量用户在启动时回填
 	Code string
+	// BuddyID 是用户挑中的健身搭子（buddies.id），0 = 没挑过，小程序展示列表第一个
+	BuddyID uint
 	// PlanLimit 是当前会员状态能保存的计划份数，不落库，读接口按 Expires 现算（见 planLimit）
 	PlanLimit int `gorm:"-" json:"PlanLimit"`
 }
@@ -276,6 +278,7 @@ func Run() {
 	a.GET("/orders", orders)
 	catalogProducts(u, a)
 	encouragementRoutes(api, a)
+	buddyRoutes(api, u, a)
 	staffGrants(a)
 	registerAdmin(a)
 	go watchOrders()

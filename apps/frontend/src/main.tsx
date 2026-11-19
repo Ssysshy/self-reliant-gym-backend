@@ -16,7 +16,9 @@ import {
   message,
 } from "antd";
 import zhCN from "antd/locale/zh_CN";
+import type { RuleObject } from "antd/es/form";
 import "./style.less";
+import { CDN_IMG, checkImagePath, imgUrl } from "./config";
 
 interface Item {
   Name: string;
@@ -112,6 +114,16 @@ interface Encouragement {
   Served: string;
   CreatedAt: string;
 }
+// 首页右下角的「健身搭子」：一张人物图 + 几句台词。用户可以挑一个收藏，
+// 没挑过就展示列表第一个；点一下搭子，小程序从 Quotes 里随机冒一句。
+interface Buddy {
+  ID: number;
+  Name: string;
+  ImageURL: string;
+  Quotes: string[];
+  Enabled: boolean;
+  Sort: number;
+}
 interface Exercise {
   ID: number;
   Name: string;
@@ -124,8 +136,7 @@ interface Exercise {
   AuxMuscles: string;
   Mistakes: string;
   ImageURL: string;
-}
-interface Part {
+}interface Part {
   Name: string;
   Subs: string[] | null;
 }
@@ -166,6 +177,12 @@ async function api<T>(
 const report = (err: unknown): void => {
   void message.error(err instanceof Error ? err.message : "操作失败");
 };
+// 图片字段的填写说明：库里只存相对路径，域名由 config.ts 的 CDN_IMG 统一拼，
+// 所以这里顺手把当前前缀显示出来，换域名时一眼能看出后台拼的是哪个域
+const imageHint = (example: string): string =>
+  `填相对路径（如 ${example}），展示时拼前缀 ${
+    CDN_IMG || "（CDN_IMG 还没配，后台预览会 404）"
+  }；原有的 https 完整链接也继续可用。`;
 // 导出用的下载：接口返回 Content-Disposition，这里取文件名后触发浏览器保存
 async function download(path: string): Promise<void> {
   const r = await fetch("/api/admin/v1" + path, {
@@ -369,6 +386,118 @@ function EncouragementForm({
   );
 }
 
+// 健身搭子表单：台词在文本框里一行一句，提交时拆成数组（后端按数组存 JSON）。
+// 图片和动作示范图一个口径：填相对路径，域名由 config.ts 的 CDN_IMG 拼。
+function BuddyForm({
+  entry,
+  onDone,
+}: {
+  entry: Buddy | "new";
+  onDone: () => void;
+}): React.JSX.Element {
+  const isNew = entry === "new";
+  return (
+    <Form
+      key={isNew ? "new" : entry.ID}
+      layout="vertical"
+      initialValues={
+        isNew
+          ? {
+              Name: "",
+              ImageURL: "",
+              QuotesText: "",
+              Sort: 10,
+              Enabled: true,
+            }
+          : { ...entry, QuotesText: (entry.Quotes || []).join("\n") }
+      }
+      onFinish={async (v: {
+        Name?: string;
+        ImageURL: string;
+        QuotesText?: string;
+        Sort?: number;
+        Enabled?: boolean;
+      }) => {
+        try {
+          const body = {
+            Name: (v.Name || "").trim(),
+            ImageURL: (v.ImageURL || "").trim(),
+            Quotes: (v.QuotesText || "")
+              .split(/\r?\n/)
+              .map((s) => s.trim())
+              .filter(Boolean),
+            Sort: Number(v.Sort ?? 0),
+            Enabled: !!v.Enabled,
+          };
+          if (isNew) await api("/buddies", body);
+          else await api("/buddies/" + entry.ID, body, "PUT");
+          onDone();
+        } catch (e) {
+          report(e);
+        }
+      }}
+    >
+      <Space size="large" align="start">
+        <Form.Item name="Name" label="名字" extra="只给后台看，选人页会显示">
+          <Input maxLength={16} placeholder="小黑" style={{ width: 180 }} />
+        </Form.Item>
+        <Form.Item name="Sort" label="排序" extra="小的排在前面">
+          <InputNumber min={-9999} max={9999} />
+        </Form.Item>
+        <Form.Item
+          name="Enabled"
+          label="启用"
+          valuePropName="checked"
+          extra="停用后小程序里看不到"
+        >
+          <Switch />
+        </Form.Item>
+      </Space>
+      <Form.Item
+        name="ImageURL"
+        label="人物图片"
+        extra={imageHint("/assets/buddies/xiaohei.png")}
+        rules={[
+          {
+            validator: (_, v: string): Promise<void> => {
+              if (!(v || "").trim()) return Promise.reject(new Error("请填写人物图片"));
+              const msg = checkImagePath(v);
+              return msg ? Promise.reject(new Error(msg)) : Promise.resolve();
+            },
+          },
+        ]}
+      >
+        <Input placeholder="/assets/buddies/xiaohei.png" allowClear />
+      </Form.Item>
+      <Form.Item
+        noStyle
+        shouldUpdate={(a, b) => a.ImageURL !== b.ImageURL}
+      >
+        {({ getFieldValue }) => {
+          const src = getFieldValue("ImageURL") as string | undefined;
+          return (src || "").trim() ? (
+            <img className="buddy-preview" src={imgUrl(src)} alt="" />
+          ) : null;
+        }}
+      </Form.Item>
+      <Form.Item
+        name="QuotesText"
+        label="台词"
+        extra="一行一句，点一下搭子随机冒一句；重复的行会自动去掉，单句最多 60 字"
+        rules={[{ required: true, message: "至少写一句" }]}
+      >
+        <Input.TextArea
+          rows={5}
+          placeholder={"今天这几组，没人替你练。\n练完这一组，再喊累。"}
+        />
+      </Form.Item>
+      <Button type="primary" htmlType="submit">
+        {isNew ? "新增" : "保存"}
+      </Button>
+    </Form>
+  );
+}
+
 // 动作资料表单：细分肌群的可选值依赖已选部位，所以单独拆一个组件拿 Form 实例。
 function ExerciseForm({
   entry,
@@ -467,12 +596,19 @@ function ExerciseForm({
       </Form.Item>
       <Form.Item
         name="ImageURL"
-        label="示范图 HTTPS 地址"
+        label="示范图地址"
+        extra={imageHint("/assets/exercises/bench-press.png")}
         rules={[
-          { pattern: /^https:\/\/\S+$/, message: "示范图须使用 HTTPS 地址" },
+          {
+            // 只填相对路径或 https：http 在真机上会被微信拦，前端先挡住
+            validator: (_, v: string): Promise<void> => {
+              const msg = checkImagePath(v);
+              return msg ? Promise.reject(new Error(msg)) : Promise.resolve();
+            },
+          },
         ]}
       >
-        <Input placeholder="https://" />
+        <Input placeholder="/assets/exercises/bench-press.png" allowClear />
       </Form.Item>
       <Button htmlType="submit" type="primary">
         保存资料
@@ -507,6 +643,9 @@ function Console(): React.JSX.Element {
     // 首页鼓励弹窗的文案，以及正在编辑的那条（"new" 是新增）
     [encouragements, setEncouragements] = useState<Encouragement[]>([]),
     [encourage, setEncourage] = useState<Encouragement | "new" | null>(null),
+    // 健身搭子：列表与正在编辑的那条（"new" 是新增）
+    [buddies, setBuddies] = useState<Buddy[]>([]),
+    [buddy, setBuddy] = useState<Buddy | "new" | null>(null),
     [admin, setAdmin] = useState(false),
     [audit, setAudit] = useState<Audit[]>([]),
     [catalog, setCatalog] = useState<Exercise[]>([]),
@@ -555,6 +694,7 @@ function Console(): React.JSX.Element {
     if (p === "会员套餐") setProducts(await api<Product[]>("/products"));
     if (p === "鼓励语")
       setEncouragements(await api<Encouragement[]>("/encouragements"));
+    if (p === "健身搭子") setBuddies(await api<Buddy[]>("/buddies"));
     if (p === "会员订单") setOrderRows(await api<Order[]>("/orders"));
     if (p === "会员管理") await loadMembers();
     if (p === "用户反馈") await loadFeedbacks(fbStatus);
@@ -665,6 +805,7 @@ function Console(): React.JSX.Element {
           "训练模板",
           "训练资料",
           "鼓励语",
+          "健身搭子",
           "会员管理",
           "会员套餐",
           "会员订单",
@@ -731,8 +872,8 @@ function Console(): React.JSX.Element {
               dependencies={["New"]}
               rules={[
                 { required: true, message: "请再输入一次新密码" },
-                ({ getFieldValue }) => ({
-                  validator: (_, value: string) =>
+                ({ getFieldValue }): RuleObject => ({
+                  validator: (_, value: string): Promise<void> =>
                     !value || getFieldValue("New") === value
                       ? Promise.resolve()
                       : Promise.reject(new Error("两次输入不一致")),
@@ -848,7 +989,11 @@ function Console(): React.JSX.Element {
                   width: 96,
                   render: (_, p: Plan) =>
                     p.Meta?.Cover ? (
-                      <img className="cover-thumb" src={p.Meta.Cover} alt="" />
+                      <img
+                        className="cover-thumb"
+                        src={imgUrl(p.Meta.Cover)}
+                        alt=""
+                      />
                     ) : (
                       <span className="dim">未设置</span>
                     ),
@@ -940,7 +1085,7 @@ function Console(): React.JSX.Element {
                     <Space>
                       {x.ImageURL && (
                         <img
-                          src={x.ImageURL}
+                          src={imgUrl(x.ImageURL)}
                           alt=""
                           style={{ width: 40, height: 40, objectFit: "contain" }}
                         />
@@ -1163,6 +1308,135 @@ function Console(): React.JSX.Element {
                   onDone={async () => {
                     setEncourage(null);
                     await openPage("鼓励语");
+                  }}
+                />
+              )}
+            </Modal>
+          </>
+        )}
+        {page === "健身搭子" && (
+          <>
+            <Space style={{ marginBottom: 16 }} wrap>
+              <Button
+                type="primary"
+                disabled={!admin}
+                onClick={() => setBuddy("new")}
+              >
+                新增搭子
+              </Button>
+              <span style={{ color: "#999" }}>
+                小程序首页右下角展示用户挑中的那个，没挑过就是列表第一个；点一下搭子，从它的台词里随机冒一句。挑人的入口在「记录与账户 → 健身搭子」。
+              </span>
+            </Space>
+            <Table
+              rowKey="ID"
+              dataSource={buddies}
+              locale={{ emptyText: "还没有搭子，点「新增搭子」传一张人物图" }}
+              pagination={{ pageSize: 20, hideOnSinglePage: true }}
+              columns={[
+                {
+                  title: "人物图",
+                  width: 96,
+                  render: (_: unknown, b: Buddy) =>
+                    b.ImageURL ? (
+                      <img
+                        className="buddy-thumb"
+                        src={imgUrl(b.ImageURL)}
+                        alt=""
+                      />
+                    ) : (
+                      <span className="dim">未设置</span>
+                    ),
+                },
+                {
+                  title: "名字",
+                  dataIndex: "Name",
+                  width: 140,
+                  render: (v: string) => v || <span className="dim">未命名</span>,
+                },
+                {
+                  title: "台词",
+                  render: (_: unknown, b: Buddy) => (
+                    <div>
+                      <span className="dim">
+                        {(b.Quotes || []).length} 句
+                      </span>
+                      {(b.Quotes || [])[0] && (
+                        <div style={{ color: "#666" }}>{b.Quotes[0]}</div>
+                      )}
+                    </div>
+                  ),
+                },
+                { title: "排序", dataIndex: "Sort", width: 70 },
+                {
+                  title: "状态",
+                  width: 90,
+                  render: (_: unknown, b: Buddy) =>
+                    b.Enabled ? (
+                      <Tag color="green">启用</Tag>
+                    ) : (
+                      <Tag>停用</Tag>
+                    ),
+                },
+                {
+                  title: "",
+                  width: 150,
+                  render: (_: unknown, b: Buddy) => (
+                    <Space size={4}>
+                      <Button
+                        size="small"
+                        disabled={!admin}
+                        onClick={() => setBuddy(b)}
+                      >
+                        编辑
+                      </Button>
+                      <Button
+                        danger
+                        size="small"
+                        disabled={!admin}
+                        onClick={() =>
+                          Modal.confirm({
+                            title: "删除「" + (b.Name || "这个搭子") + "」？",
+                            content:
+                              "收藏过它的用户会退回展示列表第一个，不用他们手动改；已经发出去的台词记录不受影响。",
+                            okText: "删除",
+                            okButtonProps: { danger: true },
+                            onOk: async () => {
+                              try {
+                                await api(
+                                  "/buddies/" + b.ID,
+                                  undefined,
+                                  "DELETE",
+                                );
+                                await openPage("健身搭子");
+                              } catch (err) {
+                                report(err);
+                              }
+                            },
+                          })
+                        }
+                      >
+                        删除
+                      </Button>
+                    </Space>
+                  ),
+                },
+              ]}
+            />
+            <Modal
+              open={!!buddy}
+              title={buddy === "new" ? "新增搭子" : "编辑搭子"}
+              footer={null}
+              destroyOnClose
+              width={620}
+              onCancel={() => setBuddy(null)}
+            >
+              {buddy && (
+                <BuddyForm
+                  entry={buddy}
+                  onDone={async () => {
+                    setBuddy(null);
+                    await openPage("健身搭子");
                   }}
                 />
               )}
@@ -1602,10 +1876,13 @@ function Console(): React.JSX.Element {
               </Divider>
               <Form.Item
                 name={["Meta", "Cover"]}
-                label="封面图链接"
-                extra="贴 https 图片地址，留空时小程序显示深色渐变块。图片所在域名要加进小程序后台的「downloadFile 合法域名」，否则真机加载不出来。"
+                label="封面图地址"
+                extra={
+                  imageHint("/assets/plans/xx.jpg") +
+                  "图片域名要加进小程序后台的「downloadFile 合法域名」，否则真机加载不出来。"
+                }
               >
-                <Input placeholder="https://example.com/cover.jpg" allowClear />
+                <Input placeholder="/assets/plans/xx.jpg" allowClear />
               </Form.Item>
               <Form.Item
                 noStyle
@@ -1616,7 +1893,7 @@ function Console(): React.JSX.Element {
                     | string
                     | undefined;
                   return src ? (
-                    <img className="cover-preview" src={src} alt="" />
+                    <img className="cover-preview" src={imgUrl(src)} alt="" />
                   ) : null;
                 }}
               </Form.Item>

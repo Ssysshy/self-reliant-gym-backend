@@ -270,6 +270,17 @@ curl -X POST http://127.0.0.1:8080/api/admin/v1/import/exercises \
 
 跨环境搬运营数据的完整流程：源环境「导出」→ 目标环境「导入」。**先动作后模板**，因为模板按动作名引用。
 
+### 图片地址
+
+`ImageURL`（动作示范图）和模板的 `Meta.Cover`（封面）在库里只存**相对路径**，形如 `/assets/exercises/bench-press.png`，域名不写进数据，由前端统一拼前缀：
+
+| 位置 | 常量 | 拼法 |
+|---|---|---|
+| 后台前端 | `apps/frontend/src/config.ts` 的 `CDN_IMG` | `imgUrl()`，列表缩略图、表单预览都用它 |
+| 小程序 | `self-reliant-gym/config/env.js` 的 `CDN_IMG` | `utils/image.js` 的 `img()` |
+
+导入的 JSON 里也按相对路径写。老数据里填过的 `https://` 完整链接继续可用（拼前缀时会原样返回），后端只拦 `http://`——正式版真机上 `<image>` 会被微信拦截。
+
 ## 1.7G 机器的内存调优
 
 `deploy/docker-compose.yml` 已按 1.7G 内存（2G 规格）配好容器预算：
