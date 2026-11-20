@@ -10,12 +10,16 @@ body {
 .layout {
   display: grid;
   grid-template-columns: 225px 1fr;
+  /* 第二行放备案号：内容短时被 1fr 撑到视口底部，内容长时自然跟在内容后面 */
+  grid-template-rows: 1fr auto;
   min-height: 100vh;
 }
 aside {
   background: #20251f;
   color: white;
   padding: 48px 24px;
+  /* 侧边栏铺满整列，包括页脚那一行，避免左下角露出底色 */
+  grid-row: 1 / span 2;
 }
 aside strong {
   font-size: 22px;
@@ -119,4 +123,28 @@ section {
 .meta-block {
   border-color: #e6e6e0;
   background: #fafaf8;
+}
+
+/* 备案号：后台每个页面（含登录页）底部居中 */
+.icp {
+  grid-column: 2;
+  padding: 16px 0 28px;
+  text-align: center;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #a3ab9c;
+}
+.icp a {
+  color: inherit;
+  text-decoration: none;
+}
+.icp a:hover {
+  color: #20231e;
+  text-decoration: underline;
+}
+/* 登录页的页脚在卡片内部，跟表单之间留一点距离 */
+.login .icp {
+  grid-column: auto;
+  margin-top: 28px;
+  padding: 0;
 }

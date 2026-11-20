@@ -760,8 +760,8 @@ function Console(): React.JSX.Element {
   if (!logged)
     return (
       <main className="login">
-        <small>撸铁不求人</small>
-        <h1>运营后台</h1>
+        <small>空白探索</small>
+        <h1>管理后台</h1>
         <Form
           layout="vertical"
           onFinish={async (v: { Account: string; Password: string }) => {
@@ -787,6 +787,11 @@ function Console(): React.JSX.Element {
             登录
           </Button>
         </Form>
+        <footer className="icp">
+          <a href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">
+            浙ICP备2026097562号-2
+          </a>
+        </footer>
       </main>
     );
   // 鼓励语页的三块派生信息：今日推送是哪条、本轮还剩几条、共有几条启用。
@@ -800,7 +805,7 @@ function Console(): React.JSX.Element {
     <div className="layout">
       <aside>
         <strong>撸铁不求人</strong>
-        <small>运营后台</small>
+        <small>管理后台</small>
         {[
           "训练模板",
           "训练资料",
@@ -2185,6 +2190,11 @@ function Console(): React.JSX.Element {
           )}
         </Modal>
       </main>
+      <footer className="icp">
+        <a href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">
+          浙ICP备2026097562号-2
+        </a>
+      </footer>
     </div>
   );
 }
