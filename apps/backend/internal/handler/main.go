@@ -228,7 +228,15 @@ func Run() {
 	api := r.Group("/api/v1")
 	api.POST("/auth/wechat", login)
 	registerCatalog(api)
-	u := api.Group("", auth("user"))
+	// 用户维度限流。默认 5 令牌/秒、突发 30：正常翻页一秒最多几个请求，余量足够；
+	// 被刷时单个账号也只能到 5r/s，换 IP 绕不过去（IP 那层由宿主机 nginx 管）。
+	userLimit := newLimiter(envFloat("RATE_LIMIT_RPS", 5), envFloat("RATE_LIMIT_BURST", 30))
+	go func() {
+		for range time.Tick(5 * time.Minute) {
+			userLimit.sweep(time.Now())
+		}
+	}()
+	u := api.Group("", auth("user"), userLimit.middleware())
 	// 编号落库后由 codeOf 兜底自愈，正常读出来就是现成的
 	u.GET("/me", func(c *gin.Context) {
 		var v User

@@ -649,6 +649,11 @@ function Console(): React.JSX.Element {
     [admin, setAdmin] = useState(false),
     [audit, setAudit] = useState<Audit[]>([]),
     [catalog, setCatalog] = useState<Exercise[]>([]),
+    // 动作表格走服务端分页：catalog 只放当前页，总条数和页码交给 Table 的分页器
+    [catTotal, setCatTotal] = useState(0),
+    [catPage, setCatPage] = useState(1),
+    // 模板编辑器的「动作」下拉要全部候选名，打开模板页时按页拉齐一次
+    [names, setNames] = useState<string[]>([]),
     [feedbacks, setFeedbacks] = useState<FeedbackRow[]>([]),
     [fbStatus, setFbStatus] = useState("待处理"),
     [fbEdit, setFbEdit] = useState<FeedbackRow | null>(null),
@@ -660,12 +665,60 @@ function Console(): React.JSX.Element {
     [gear, setGear] = useState(""),
     [kw, setKw] = useState(""),
     [query, setQuery] = useState("");
+  // 动作搜索框的防抖句柄：useRef 不参与渲染，不塞进上面那串 useState
+  const kwTimer = useRef<number>(0);
+  // 动作表格一页 20 条：筛选和翻页都打到后端，878 条不可能一次拉完再本地筛。
+  // 搜索框 onChange 每次都会调到这里，外面套了 300ms 防抖。
+  const CATALOG_PAGE = 20;
+  async function loadCatalog(
+    pageNo: number,
+    p = part,
+    g = gear,
+    k = kw,
+  ): Promise<void> {
+    const qs = [
+      "pageNo=" + pageNo,
+      "pageSize=" + CATALOG_PAGE,
+      p ? "muscle=" + encodeURIComponent(p) : "",
+      g ? "category=" + encodeURIComponent(g) : "",
+      k.trim() ? "q=" + encodeURIComponent(k.trim()) : "",
+    ].filter(Boolean);
+    const r = await api<{ Items: Exercise[]; Total: number }>(
+      "/exercises?" + qs.join("&"),
+    );
+    setCatalog(r.Items);
+    setCatTotal(r.Total);
+    setCatPage(pageNo);
+  }
+  // 模板编辑器的「动作」下拉要全部候选名，按 pageSize 上限翻页拉齐后只留名字。
+  // 只在这里值得多拉几次请求：Select 的候选必须完整，否则存过的动作显示不出来。
+  async function loadNames(): Promise<void> {
+    const all: string[] = [];
+    for (let pageNo = 1; ; pageNo++) {
+      const r = await api<{ Items: Exercise[]; Total: number }>(
+        "/exercises?pageNo=" + pageNo + "&pageSize=200",
+      );
+      all.push(...r.Items.map((x) => x.Name));
+      if (!r.Items.length || all.length >= r.Total) break;
+    }
+    setNames(all);
+  }
+  // 打开模板编辑器时才拉动作名：不点进编辑就不该为它付这几个请求
+  function openEditor(p: Plan): void {
+    if (names.length === 0) void loadNames().catch(report);
+    setEdit(p);
+  }
   async function refresh(): Promise<void> {
     const rows = await api<Plan[]>("/templates");
     setPlans(rows);
-    setCatalog(await api<Exercise[]>("/exercises"));
     setMeta(await api<Meta>("/categories"));
     setAdmin((await api<{ admin: boolean }>("/me")).admin);
+    // 整页刷新把筛选一起清掉，保证界面上的筛选器和列表是同一套条件
+    setPart("");
+    setGear("");
+    setKw("");
+    await loadCatalog(1, "", "", "");
+    setNames([]);
     setLogged(true);
   }
   useEffect(() => {
@@ -698,8 +751,7 @@ function Console(): React.JSX.Element {
     if (p === "会员订单") setOrderRows(await api<Order[]>("/orders"));
     if (p === "会员管理") await loadMembers();
     if (p === "用户反馈") await loadFeedbacks(fbStatus);
-    if (p === "训练资料" || p === "训练模板")
-      setCatalog(await api<Exercise[]>("/exercises"));
+    if (p === "训练资料") await loadCatalog(1);
     setPage(p);
   }
   async function submitPlan(values: Plan): Promise<void> {
@@ -925,8 +977,8 @@ function Console(): React.JSX.Element {
               setImportKind(null);
               setImportText("");
               setImportName("");
-              // openPage 只刷新训练资料用的 catalog，模板表用的是 plans，
-              // 所以这里走整页刷新，两张表都能看到新数据
+              // refresh 会重拉模板、动作第一页和分类，并把动作筛选清空；
+              // 导入后要看新数据，清掉筛选反而更符合预期
               await refresh();
               setPage(kind === "plans" ? "训练模板" : "训练资料");
             } catch (e) {
@@ -968,7 +1020,7 @@ function Console(): React.JSX.Element {
               <Button
                 type="primary"
                 onClick={() =>
-                  setEdit({
+                  openEditor({
                     ID: 0,
                     Revision: 0,
                     Name: "",
@@ -1016,7 +1068,7 @@ function Console(): React.JSX.Element {
                   title: "",
                   render: (_, p: Plan) => (
                     <Space>
-                      <Button onClick={() => setEdit(p)}>配置</Button>
+                      <Button onClick={() => openEditor(p)}>配置</Button>
                       <Button
                         danger
                         type="text"
@@ -1039,7 +1091,10 @@ function Console(): React.JSX.Element {
                 placeholder="全部部位"
                 allowClear
                 value={part || undefined}
-                onChange={(v: string | undefined) => setPart(v || "")}
+                onChange={(v: string | undefined) => {
+                  setPart(v || "");
+                  void loadCatalog(1, v || "", gear, kw).catch(report);
+                }}
                 options={(meta?.Parts || []).map((p) => ({
                   label: p.Name,
                   value: p.Name,
@@ -1050,7 +1105,10 @@ function Console(): React.JSX.Element {
                 placeholder="全部器材分类"
                 allowClear
                 value={gear || undefined}
-                onChange={(v: string | undefined) => setGear(v || "")}
+                onChange={(v: string | undefined) => {
+                  setGear(v || "");
+                  void loadCatalog(1, part, v || "", kw).catch(report);
+                }}
                 options={(meta?.Categories || []).map((c) => ({
                   label: c,
                   value: c,
@@ -1061,7 +1119,15 @@ function Console(): React.JSX.Element {
                 placeholder="搜索动作或器材"
                 allowClear
                 value={kw}
-                onChange={(e) => setKw(e.target.value)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setKw(v);
+                  // 每敲一个字都打一次接口太浪费，300ms 内没再输入才发请求
+                  window.clearTimeout(kwTimer.current);
+                  kwTimer.current = window.setTimeout(() => {
+                    void loadCatalog(1, part, gear, v).catch(report);
+                  }, 300);
+                }}
               />
               <Button onClick={() => setEntry(emptyExercise())}>新增动作</Button>
               <Button onClick={() => setImportKind("exercises")}>导入</Button>
@@ -1073,15 +1139,16 @@ function Console(): React.JSX.Element {
             </Space>
             <Table
               rowKey="ID"
-              dataSource={catalog.filter(
-                (x) =>
-                  (!part || x.Muscle === part) &&
-                  (!gear || x.Category === gear) &&
-                  (!kw ||
-                    (x.Name + x.SubMuscle + x.Equipment).includes(kw.trim())),
-              )}
+              dataSource={catalog}
               locale={{ emptyText: "没有符合条件的动作" }}
-              pagination={{ pageSize: 20, hideOnSinglePage: true }}
+              pagination={{
+                current: catPage,
+                pageSize: CATALOG_PAGE,
+                total: catTotal,
+                hideOnSinglePage: true,
+                showSizeChanger: false,
+                onChange: (p) => void loadCatalog(p).catch(report),
+              }}
               columns={[
                 {
                   title: "动作",
@@ -2001,9 +2068,9 @@ function Console(): React.JSX.Element {
                                     <Select
                                       showSearch
                                       style={{ minWidth: 130 }}
-                                      options={catalog.map((x) => ({
-                                        label: x.Name,
-                                        value: x.Name,
+                                      options={names.map((n) => ({
+                                        label: n,
+                                        value: n,
                                       }))}
                                     />
                                   </Form.Item>

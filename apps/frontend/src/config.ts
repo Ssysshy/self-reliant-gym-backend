@@ -4,8 +4,9 @@
 // 域名集中在这一个文件里：换 CDN 只改 CDN_IMG 这一行，数据和小程序都不用动。
 // 小程序那边对应的是 self-reliant-gym/config/env.js 里的 CDN_IMG，两处填同一个域名。
 //
-// 留空时 <img> 拿到的是站内相对路径，后台预览会 404 —— 接了 CDN 就把域名填上。
-export const CDN_IMG = ""; // 例："https://img.example.com"
+// 留空时 <img> 拿到的是站内相对路径，而后台静态目录里并没有 /assets/exercises 这些图，
+// 所以后台预览一定是 404 —— 线上必须填域名，和小程序那边保持同一个。
+export const CDN_IMG = "https://cdn.voiddiver.cn";
 
 // 把库里存的相对路径拼成能直接放进 <img src> 的完整地址。
 // 已带协议的（老数据里填过的完整 http/https 链接）、协议相对的地址原样返回，

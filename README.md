@@ -43,9 +43,9 @@ ENV_FILE=../../.env.production go run ./cmd/api   # 只读这份，指错路径�
 
 ## 容器部署
 
-部署文件都集中在 `deploy/`：`Dockerfile`（多阶段，一次构建产出 `web` 和 `api` 两个镜像）、`docker-compose.yml`、`nginx.conf`。
+部署文件都集中在 `deploy/`：`Dockerfile`（多阶段，一次构建产出 `web` 和 `api` 两个镜像）、`docker-compose.yml`、`nginx.conf`（容器内）、`nginx.host.conf` + `nginx.limit.conf`（宿主机）。
 
-**只有一份编排**，架构已经定死在里面：数据库在宿主机上（不在容器里），`web` 同时监听 `0.0.0.0:8080`（公网 IP 打开后台）和 `127.0.0.1:18080`（SSH 隧道调试）。唯一保留的叠加文件是 `docker-compose.https.yml`，因为它依赖证书文件存在，没法并进基础文件。
+**只有一份编排**，架构已经定死在里面：数据库在宿主机上（不在容器里），`web` 只把端口绑在 `127.0.0.1:18080`（宿主机 nginx 反代 + SSH 隧道调试），**不对外发布任何端口**。唯一保留的叠加文件是 `docker-compose.https.yml`，因为它依赖证书文件存在，没法并进基础文件。
 
 构建上下文是**仓库根**（`Dockerfile` 里有 `COPY apps/backend/`、`COPY deploy/nginx.conf`），所以命令必须在仓库根目录执行。Compose 默认只读 compose 文件同级的 `.env`，因此要显式带上 `--env-file`：
 
@@ -55,7 +55,7 @@ docker compose --env-file .env -f deploy/docker-compose.yml logs -f api
 docker compose --env-file .env -f deploy/docker-compose.yml down
 ```
 
-访问 `http://127.0.0.1:18080`（或对外的 `8080`）：Nginx 托管后台静态页，并把 `/api/` 反向代理给 `api` 服务。
+访问 `http://127.0.0.1:18080`（或经宿主机 nginx 的 `https://gymadmin.voiddiver.cn`）：Nginx 托管后台静态页，并把 `/api/` 反向代理给 `api` 服务。
 
 编排只有 `api` 和 `web` 两个服务。`api` 通过 `host.docker.internal` 连宿主机上的 MySQL——这个主机名由 `extra_hosts: host-gateway` 解析到 docker0 网关（`172.17.0.1`）。由此有两个前置条件：
 
@@ -154,29 +154,29 @@ ssh user@<服务器> 'cd <仓库路径> && docker compose --env-file .env -f dep
 
 建议先配好免密钥登录（`ssh-copy-id user@host`），否则连通性检查、建目录、传包、load、up、ps 每一步都要输一次密码。
 
-### 用公网 IP 访问后台（当前方式）
+### 后台访问方式（公网 8080 已关闭）
 
-没有域名和证书时，用 `http://<公网IP>:8080` 打开后台。这是基础编排自带的，不需要任何叠加参数：
+`web` 容器只绑 `127.0.0.1:18080`，后台只能经宿主机 nginx 的 https 域名访问：
 
-```bash
-./deploy/publish.sh root@1.2.3.4 --config --env .env.production
+```
+https://gymadmin.voiddiver.cn
 ```
 
-**安全组必须放行 TCP 8080**，否则连不上。`127.0.0.1:18080` 那条同时保留，SSH 隧道调试不受影响：
+需要直连容器调试时走 SSH 隧道，不要重新开放公网端口：
 
 ```bash
 ssh -L 18080:127.0.0.1:18080 user@host
+# 浏览器打开 http://127.0.0.1:18080
 ```
 
 后台页由 nginx 托管，`/api/` 反代给 `api`，前端 `fetch("/api/admin/v1...")` 是同源相对路径——不需要改前端代码，也不涉及 CORS。
 
-三个前提：
+> **历史入口已移除**：早期没有域名时 `web` 发布过 `0.0.0.0:8080`，用 `http://<公网IP>:8080` 打开后台。
+> 它绕过 nginx 的 `/api/v1/` 收口，且登录口令与 session cookie 在公网明文传输，现已从编排里删除。
+> 安全组里给 8080 的放行规则也应一并收掉，否则端口虽然没人监听，规则本身仍是暴露面。
 
-- **只能打开后台，小程序照旧不通**。微信小程序的 `request` 只接受 HTTPS + 已登记域名，IP + HTTP 一律被拒。
-- **是明文 HTTP**。登录口令和 session cookie 在公网上明文传输，务必先把 `ADMIN_PASSWORD`、`OPERATOR_PASSWORD` 换成强口令；更稳的做法是安全组里把 8080 的来源 IP 限制成自己的出口 IP。
-- **`COOKIE_SECURE=0` 是配套设置**。不带它，浏览器会丢弃明文 HTTP 下的 `Secure` cookie，症状是登录接口返回成功、下一个接口却提示「请登录」。接入 HTTPS 后改回 `1`。
-
-想只留 SSH 隧道、关掉公网入口，把 compose 里的 `- "0.0.0.0:8080:80"` 删掉重新发布即可。
+`COOKIE_SECURE` 因此改为 `1`（见 `.env.production`）：全站只有 https，没有明文入口需要兼容。
+若哪天又回到 `http://IP:端口` 访问，必须同时把它改回 `0`，否则浏览器会静默丢弃 Secure cookie，症状是登录返回成功、下一个接口却提示「请登录」。
 
 ### 对外 HTTPS（有域名之后）
 
@@ -203,6 +203,76 @@ docker compose --env-file .env -f deploy/docker-compose.yml -f deploy/docker-com
 证书来源：云厂商免费 DV 证书（下载 Nginx 格式直接拷）、`certbot certonly --webroot -w deploy/certbot/www -d api.example.com`、或挂在自己的 CDN/负载均衡上（此时不叠加那层 compose，改成回源 `18080:80` 并限制安全组）。
 
 证书链不完整是小程序侧最常见的故障：`request:fail ssl hand shake error` 基本都是只传了服务器证书、漏了中间证书。
+
+### 限流
+
+两层，各管一段，互不替代：
+
+| 层 | 位置 | 维度 | 挡什么 |
+|---|---|---|---|
+| nginx | `nginx.limit.conf` + `nginx.host.conf` | 客户端 IP | 单机换着接口刷、后台口令爆破 |
+| API | `internal/handler/limit.go` | 用户 uid（JWT 里） | 一个真实账号拿到 token 后高频刷，换代理也绕不过 |
+
+**为什么不加客户端签名**：小程序的包能被解包，签名密钥一定拿得到，它只能挡住手敲 Postman 的人，挡不住脚本。按 uid 的额度是服务端算的，脚本无法伪造。
+
+nginx 侧三个 zone（都在 `nginx.limit.conf`，放 `/etc/nginx/conf.d/`）：
+
+| zone | 用在 | 速率 |
+|---|---|---|
+| `gym_api` | `/api/v1/` | 30r/s，burst 60 |
+| `gym_login` | `/api/v1/auth/wechat` | 120r/m，burst 60 |
+| `gym_admin` | `/api/admin/v1/login` | 10r/m，burst 10 |
+
+登录两个 zone 都比业务接口松/紧得有理由：`gym_login` 要容纳「健身房 WiFi 下几十人同时打开小程序」，`gym_admin` 只有一个运营在用，同时兼作口令爆破门槛。超限统一返回 `429` + `{"error":"操作太频繁，请稍后再试"}`，小程序会直接弹 toast。
+
+API 侧是内存令牌桶，默认 5 令牌/秒、突发 30，可用环境变量调：
+
+```bash
+RATE_LIMIT_RPS=5      # 长期速率
+RATE_LIMIT_BURST=30   # 瞬时并发上限
+```
+
+单机部署用内存即可（重启清零，几秒补满）；**扩到多实例必须换共享存储**，否则每个实例各算各的，实际放行速率是实例数的倍数。
+
+`429` 不是 `401`，不会触发小程序的静默重登逻辑，页面只会看到一句「操作太频繁」。
+
+### 动作库列表分页
+
+`GET /api/v1/exercises` 返回的是**分页对象**，不是裸数组：
+
+```json
+{"Items":[{"ID":1,"Name":"坐姿推胸","Muscle":"胸","SubMuscle":"中胸",
+           "Category":"器械","Equipment":"推胸机","ImageURL":"/assets/..."}],
+ "Total":73,"PageNo":1,"PageSize":20}
+```
+
+两个约束：
+
+- **`Items` 只有 7 个字段**，不含 `Guide` / `Setup` / `Mistakes`。教学文案动辄上百字，878 条一起下发会到几百 KB，而所有列表页一个字段都用不到——详情页单独走 `GET /exercises/:id` 取全量。
+- **分页参数是 `pageNo`（从 1 开始）+ `pageSize`，`pageSize` 不传默认 20，硬上限 200**。`parsePage` 会把 `pageSize=99999` 截到 200，`pageNo=0`、负数、非数字都退回第 1 页/默认值。
+
+只有页号和页大小，没有 `offset`——偏移由服务端按 `(pageNo-1)*pageSize` 算，调用方不用关心。
+
+客户端不用自己写循环：小程序 `api.ts` 的 `exercises()` 会按 `pageSize=200` 翻页拉齐后缓存在 `globalData`，一个会话只拉一次。这里显式用 200 而不是默认的 20，是因为五个页面都在本地筛选、需要全量：878 条用 200 是 5 次请求，用 20 要 44 次。
+
+后台的 `/api/admin/v1/exercises` 使用**同一套分页口径**（`pageNo` / `pageSize`，默认 20），只是字段更全——编辑表单必须拿到 `Guide` / `Setup` / `Mistakes`。后台表格的筛选（部位、器材分类、关键词）也都走服务端，翻页和筛选会重新请求，不再一次性拉全量到浏览器。模板编辑器的「动作」下拉需要完整候选名，打开编辑器时按 `pageSize=200` 翻页拉齐一次（878 条约 5 个请求）。
+
+### 图片 CDN（cdn.voiddiver.cn）
+
+**它只服务静态图片，接口不经过它**——源站是 COS 对象存储，不是本机，`gymapi.voiddiver.cn` 仍然直接解析到源站 IP。
+
+这条边界很重要：正因为接口没走 CDN，nginx 的 `$binary_remote_addr` 拿到的仍是真实客户端 IP，上面三个限流 zone 不需要 `real_ip` 还原。**哪天把接口挂到 CDN 前面，必须补 `set_real_ip_from` + `real_ip_header X-Forwarded-For`，否则所有用户会挤进同一个桶。**
+
+接入图片 CDN 的三步（当前只完成了第一步的基础设施，COS 桶还是空的）：
+
+1. 图片传到 COS，**路径必须与小程序包内结构一致**（`/assets/plans/xx.jpg`、`/assets/exercises/xx.gif`）——库里只存相对路径，由 `utils/image.js` 拼前缀，结构不一致会拼出 404。
+2. 小程序 `config/env.js` 的 `CDN_IMG` 改成 `https://cdn.voiddiver.cn`，只改这一行，页面和数据库都不用动。
+3. 微信后台「开发管理 → 开发设置」里登记该域名（官方文档没把 `<image>` 列为必须登记项，但正式版有被拦的反馈，免费加上更稳）。
+
+两个坑：
+
+- **不要开 Referer 防盗链**。小程序的 `<image>` 请求不带 Referer，一开全部 403，表现是「图片全白」。
+- 缓存时间设长（图片内容不变），但**换图必须手动刷新**：文件名不变、缓存键不变，CDN 会继续返回旧图。
 
 ### 基础镜像拉不动时
 
@@ -255,7 +325,7 @@ docker cp $(docker ps -qf name=api):/app/seed/exercises.json .
 导入的请求体两种写法都接受：
 
 ```bash
-curl -X POST http://127.0.0.1:8080/api/admin/v1/import/exercises \
+curl -X POST http://127.0.0.1:18080/api/admin/v1/import/exercises \
   -H 'Content-Type: application/json' -H 'X-Gym-Admin: 1' \
   --cookie 'gym_admin=...' \
   -d @seed/exercises.json            # 裸数组，也可以是 {"items":[...]}
@@ -278,6 +348,8 @@ curl -X POST http://127.0.0.1:8080/api/admin/v1/import/exercises \
 |---|---|---|
 | 后台前端 | `apps/frontend/src/config.ts` 的 `CDN_IMG` | `imgUrl()`，列表缩略图、表单预览都用它 |
 | 小程序 | `self-reliant-gym/config/env.js` 的 `CDN_IMG` | `utils/image.js` 的 `img()` |
+
+**两处都必须填**，当前都是 `https://cdn.voiddiver.cn`。只填小程序那边的话，小程序正常、后台预览全是裂图——后台静态目录里没有 `/assets/exercises` 这些图，相对路径在后台一定会 404。
 
 导入的 JSON 里也按相对路径写。老数据里填过的 `https://` 完整链接继续可用（拼前缀时会原样返回），后端只拦 `http://`——正式版真机上 `<image>` 会被微信拦截。
 

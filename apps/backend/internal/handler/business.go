@@ -372,7 +372,7 @@ func registerAdmin(g *gin.RouterGroup) {
 		c.SetCookie("gym_admin", "", -1, "/api/admin", "", true, true)
 		c.JSON(200, true)
 	})
-	g.GET("/exercises", exerciseList)
+	g.GET("/exercises", adminExerciseList)
 	// 部位与器材分类的约定顺序：后台下拉和小程序侧边栏共用一份，避免两边手工对齐。
 	g.GET("/categories", categories)
 	// 用户反馈：后台按时间倒序看最新 200 条，可按状态、用户编号或内容关键词筛。
