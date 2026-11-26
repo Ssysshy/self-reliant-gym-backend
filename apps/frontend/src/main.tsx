@@ -669,6 +669,48 @@ function ExerciseSelect({
     />
   );
 }
+// 「复制当日」：原样复制这天的训练部位和动作，插在它后面。
+// 训练日不用原来那天，而是往后挑一个还空着的——后端要求一份计划里每个星期几最多一天，
+// 复制出来撞了日子，发布时会被整单拦下。
+function CopyDayButton({
+  index,
+  add,
+}: {
+  index: number;
+  add: (day: Day, at: number) => void;
+}): React.JSX.Element {
+  const form = Form.useFormInstance();
+  return (
+    <Button
+      onClick={() => {
+        const days = (form.getFieldValue("Days") as Day[] | undefined) || [];
+        if (days.length >= 7) {
+          void message.warning("一周最多 7 个训练日，不能再复制了");
+          return;
+        }
+        const src = days[index];
+        if (!src) return;
+        const taken = new Set(days.map((d) => d.Weekday));
+        let weekday = src.Weekday;
+        for (let i = 0; i < 7; i++) {
+          weekday = (weekday % 7) + 1;
+          if (!taken.has(weekday)) break;
+        }
+        // Items 要逐条复制，直接传引用会让两天共享同一个数组/对象
+        add(
+          {
+            Weekday: weekday,
+            Focus: src.Focus,
+            Items: (src.Items || []).map((i) => ({ ...i })),
+          },
+          index + 1,
+        );
+      }}
+    >
+      复制当日
+    </Button>
+  );
+}
 function Console(): React.JSX.Element {
   const [logged, setLogged] = useState(false),
     [pwOpen, setPwOpen] = useState(false),
@@ -2153,6 +2195,7 @@ function Console(): React.JSX.Element {
                           <Form.Item name={[d.name, "Focus"]} label="训练部位">
                             <Input />
                           </Form.Item>
+                          <CopyDayButton index={d.name} add={add} />
                           <Button onClick={() => remove(d.name)}>
                             移除此日
                           </Button>
