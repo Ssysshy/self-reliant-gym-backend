@@ -31,7 +31,11 @@ type User struct {
 	// PlanLimit 是当前会员状态能保存的计划份数，不落库，读接口按 Expires 现算（见 planLimit）
 	PlanLimit int `gorm:"-" json:"PlanLimit"`
 }
+
+// Item 里的 ExerciseID 才是引用键，Name 只是展示快照（改名时会被同步刷新）。
+// ExerciseID 为 0 表示用户自建动作：不进动作库，只存在本人计划里。
 type Item struct {
+	ExerciseID       uint
 	Name             string
 	Sets, Reps, Rest int
 }
@@ -218,6 +222,10 @@ func Run() {
 		log.Fatal(e)
 	}
 	if e = migrations.Run(db); e != nil {
+		log.Fatal(e)
+	}
+	// 老计划里只有动作名，没有引用 ID；这里按名称回填一次并记进 schema_versions。
+	if e = backfillItemExerciseIDs(); e != nil {
 		log.Fatal(e)
 	}
 	// 内置动作与模板不再自动导入，需要时用后台「导入」按钮推 seed/*.json

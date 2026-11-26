@@ -3,6 +3,7 @@ package handler
 import (
 	"errors"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -55,10 +56,6 @@ func templateEditor(g *gin.RouterGroup) {
 			fail(c, 400, "模板操作无效")
 			return
 		}
-		if input.Intent == "publish" && !valid(input.Plan) {
-			fail(c, 400, "请检查训练日、组次与休息时长")
-			return
-		}
 		e := db.Transaction(func(tx *gorm.DB) error {
 			var p Plan
 			if input.ID != 0 {
@@ -69,21 +66,27 @@ func templateEditor(g *gin.RouterGroup) {
 					return conflict
 				}
 			}
+			// 草稿和发布都要先按 ID 归一名称：草稿存的是旧名字，列表里会显示错的
+			if input.Intent == "draft" || input.Intent == "publish" {
+				if e := normalizeItems(tx, input.Days); e != nil {
+					return e
+				}
+			}
 			if input.Intent == "publish" {
-				var names []string
-				if err := tx.Model(&Exercise{}).Pluck("name", &names).Error; err != nil {
-					return err
-				}
-				known := map[string]bool{}
-				for _, name := range names {
-					known[name] = true
-				}
+				// 官方模板只能引用动作库里的动作：ExerciseID=0 是用户自建动作，不能发布
 				for _, d := range input.Days {
 					for _, i := range d.Items {
-						if !known[i.Name] {
-							return conflict
+						if i.ExerciseID == 0 {
+							if strings.TrimSpace(i.Name) == "" {
+								return invalid("有一条动作还没选，请补上再发布")
+							}
+							return invalid("动作「" + i.Name + "」不在动作库，请先收录或替换")
 						}
 					}
+				}
+				// 归一名称之后再校验结构：空动作已经由上面拦掉，这里只剩组次/休息的问题
+				if !valid(input.Plan) {
+					return invalid("请检查训练日、组次与休息时长")
 				}
 				p.Name = input.Name
 				p.Days = input.Days

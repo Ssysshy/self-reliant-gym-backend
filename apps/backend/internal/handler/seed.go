@@ -53,6 +53,10 @@ func importPlanRows(rows []Plan) (importResult, error) {
 			if rows[i].Revision == 0 {
 				rows[i].Revision = 1
 			}
+			// 跨环境的自增 ID 不可信：导入的模板一律按动作名重新挂接
+			if e := linkItemsByName(tx, rows[i].Days); e != nil {
+				return e
+			}
 			res := tx.Clauses(clause.OnConflict{DoNothing: true}).Create(&rows[i])
 			if res.Error != nil {
 				return res.Error

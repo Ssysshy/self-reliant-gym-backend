@@ -21,6 +21,8 @@ import "./style.less";
 import { CDN_IMG, checkImagePath, imgUrl } from "./config";
 
 interface Item {
+  // ExerciseID 是引用键（0 = 用户自建动作），Name 只是展示快照
+  ExerciseID: number;
   Name: string;
   Sets: number;
   Reps: number;
@@ -136,6 +138,12 @@ interface Exercise {
   AuxMuscles: string;
   Mistakes: string;
   ImageURL: string;
+}
+// 删除动作前的影响面：引用它的模板（含草稿）与个人计划数量
+interface ExerciseRefs {
+  Templates: { ID: number; Name: string; Published: boolean }[];
+  Drafts: number;
+  Plans: number;
 }interface Part {
   Name: string;
   Subs: string[] | null;
@@ -212,10 +220,17 @@ function parseItems<T>(text: string): T[] | null {
   }
   return null;
 }
+const blankItem = (): Item => ({
+  ExerciseID: 0,
+  Name: "",
+  Sets: 3,
+  Reps: 10,
+  Rest: 60,
+});
 const blankDay = (): Day => ({
   Weekday: 1,
   Focus: "全身",
-  Items: [{ Name: "坐姿推胸", Sets: 3, Reps: 10, Rest: 60 }],
+  Items: [blankItem()],
 });
 // 新建模板时的展示信息默认值：封面留空就由小程序显示深色渐变块
 const blankMeta = (): PlanMeta => ({
@@ -533,7 +548,16 @@ function ExerciseForm({
         }
       }}
     >
-      <Form.Item name="Name" label="动作名称" rules={[{ required: true }]}>
+      <Form.Item
+        name="Name"
+        label="动作名称"
+        rules={[{ required: true }]}
+        extra={
+          entry.ID
+            ? "改名会同步到引用它的模板与个人计划；训练记录保留当时的名称。"
+            : undefined
+        }
+      >
         <Input />
       </Form.Item>
       <Space align="start">
@@ -616,6 +640,35 @@ function ExerciseForm({
     </Form>
   );
 }
+// 模板编辑器里选动作：value 用 ExerciseID，名字只做 label。
+// 存过的 ID 在动作库里找不到（动作被删）时补一条禁用项，避免 antd 直接显示裸数字。
+function ExerciseSelect({
+  value,
+  onChange,
+  options,
+}: {
+  value?: number;
+  onChange?: (v: number) => void;
+  options: Exercise[];
+}): React.JSX.Element {
+  const list: { label: string; value: number; disabled?: boolean }[] = options.map(
+    (x) => ({ label: x.Name, value: x.ID }),
+  );
+  if (value && options.length > 0 && !options.some((x) => x.ID === value)) {
+    list.unshift({ label: "已失效动作，请重新选择", value, disabled: true });
+  }
+  return (
+    <Select
+      showSearch
+      optionFilterProp="label"
+      placeholder="选择动作"
+      style={{ minWidth: 180 }}
+      value={value || undefined}
+      onChange={onChange}
+      options={list}
+    />
+  );
+}
 function Console(): React.JSX.Element {
   const [logged, setLogged] = useState(false),
     [pwOpen, setPwOpen] = useState(false),
@@ -652,14 +705,19 @@ function Console(): React.JSX.Element {
     // 动作表格走服务端分页：catalog 只放当前页，总条数和页码交给 Table 的分页器
     [catTotal, setCatTotal] = useState(0),
     [catPage, setCatPage] = useState(1),
-    // 模板编辑器的「动作」下拉要全部候选名，打开模板页时按页拉齐一次
-    [names, setNames] = useState<string[]>([]),
+    // 模板编辑器的「动作」下拉要全部候选：value 用 ID，所以整条拉下来只留 ID/Name
+    [options, setOptions] = useState<Exercise[]>([]),
     [feedbacks, setFeedbacks] = useState<FeedbackRow[]>([]),
     [fbStatus, setFbStatus] = useState("待处理"),
     [fbEdit, setFbEdit] = useState<FeedbackRow | null>(null),
     [fbNote, setFbNote] = useState(""),
     [fbOwner, setFbOwner] = useState(""),
     [entry, setEntry] = useState<Exercise | null>(null),
+    // 删除动作：removing 是待删的那条，refs 是引用影响，confirmName 要求照着名字再输一遍
+    [removing, setRemoving] = useState<Exercise | null>(null),
+    [refs, setRefs] = useState<ExerciseRefs | null>(null),
+    [confirmName, setConfirmName] = useState(""),
+    [deleting, setDeleting] = useState(false),
     [meta, setMeta] = useState<Meta | null>(null),
     [part, setPart] = useState(""),
     [gear, setGear] = useState(""),
@@ -670,6 +728,36 @@ function Console(): React.JSX.Element {
   // 动作表格一页 20 条：筛选和翻页都打到后端，878 条不可能一次拉完再本地筛。
   // 搜索框 onChange 每次都会调到这里，外面套了 300ms 防抖。
   const CATALOG_PAGE = 20;
+  // 有引用时要求输入动作名确认（和「注销账号」同一套交互），没有引用直接删
+  const mustConfirm =
+    !!refs && (refs.Templates.length > 0 || refs.Drafts > 0 || refs.Plans > 0);
+  async function openRemove(x: Exercise): Promise<void> {
+    setRemoving(x);
+    setRefs(null);
+    setConfirmName("");
+    try {
+      setRefs(await api<ExerciseRefs>("/exercises/" + x.ID + "/references"));
+    } catch (e) {
+      setRemoving(null);
+      report(e);
+    }
+  }
+  async function removeExercise(): Promise<void> {
+    if (!removing || deleting) return;
+    setDeleting(true);
+    try {
+      await api("/exercises/" + removing.ID, undefined, "DELETE");
+      setRemoving(null);
+      // 动作列表变了，模板编辑器的候选下次重新拉
+      setOptions([]);
+      await loadCatalog(catPage);
+      void message.success("已删除");
+    } catch (e) {
+      report(e);
+    } finally {
+      setDeleting(false);
+    }
+  }
   async function loadCatalog(
     pageNo: number,
     p = part,
@@ -690,22 +778,23 @@ function Console(): React.JSX.Element {
     setCatTotal(r.Total);
     setCatPage(pageNo);
   }
-  // 模板编辑器的「动作」下拉要全部候选名，按 pageSize 上限翻页拉齐后只留名字。
+  // 模板编辑器的「动作」下拉要全部候选，按 pageSize 上限翻页拉齐。
   // 只在这里值得多拉几次请求：Select 的候选必须完整，否则存过的动作显示不出来。
-  async function loadNames(): Promise<void> {
-    const all: string[] = [];
+  async function loadOptions(): Promise<void> {
+    const all: Exercise[] = [];
     for (let pageNo = 1; ; pageNo++) {
       const r = await api<{ Items: Exercise[]; Total: number }>(
         "/exercises?pageNo=" + pageNo + "&pageSize=200",
       );
-      all.push(...r.Items.map((x) => x.Name));
+      all.push(...r.Items);
       if (!r.Items.length || all.length >= r.Total) break;
     }
-    setNames(all);
+    setOptions(all);
   }
-  // 打开模板编辑器时才拉动作名：不点进编辑就不该为它付这几个请求
-  function openEditor(p: Plan): void {
-    if (names.length === 0) void loadNames().catch(report);
+  // 打开模板编辑器时才拉：不点进编辑就不该为它付这几个请求。
+  // 拉完再开弹窗，避免动作 ID 先渲染成裸数字再跳成名字。
+  async function openEditor(p: Plan): Promise<void> {
+    if (options.length === 0) await loadOptions();
     setEdit(p);
   }
   async function refresh(): Promise<void> {
@@ -718,7 +807,7 @@ function Console(): React.JSX.Element {
     setGear("");
     setKw("");
     await loadCatalog(1, "", "", "");
-    setNames([]);
+    setOptions([]);
     setLogged(true);
   }
   useEffect(() => {
@@ -1020,14 +1109,14 @@ function Console(): React.JSX.Element {
               <Button
                 type="primary"
                 onClick={() =>
-                  openEditor({
+                  void openEditor({
                     ID: 0,
                     Revision: 0,
                     Name: "",
                     Published: false,
                     Days: [blankDay()],
                     Meta: blankMeta(),
-                  })
+                  }).catch(report)
                 }
               >
                 新建周模板
@@ -1068,7 +1157,9 @@ function Console(): React.JSX.Element {
                   title: "",
                   render: (_, p: Plan) => (
                     <Space>
-                      <Button onClick={() => openEditor(p)}>配置</Button>
+                      <Button onClick={() => void openEditor(p).catch(report)}>
+                        配置
+                      </Button>
                       <Button
                         danger
                         type="text"
@@ -1187,9 +1278,19 @@ function Console(): React.JSX.Element {
                 { title: "具体器材", dataIndex: "Equipment", width: 150 },
                 {
                   title: "",
-                  width: 80,
+                  width: 150,
                   render: (_, x: Exercise) => (
-                    <Button onClick={() => setEntry(x)}>编辑</Button>
+                    <Space>
+                      <Button onClick={() => setEntry(x)}>编辑</Button>
+                      <Button
+                        danger
+                        disabled={!admin}
+                        title={admin ? undefined : "需要管理员权限"}
+                        onClick={() => void openRemove(x)}
+                      >
+                        删除
+                      </Button>
+                    </Space>
                   ),
                 },
               ]}
@@ -2063,16 +2164,15 @@ function Console(): React.JSX.Element {
                                 <div className="line" key={i.key}>
                                   <Form.Item
                                     label="动作"
-                                    name={[i.name, "Name"]}
+                                    name={[i.name, "ExerciseID"]}
+                                    rules={[
+                                      {
+                                        required: true,
+                                        message: "请选择动作",
+                                      },
+                                    ]}
                                   >
-                                    <Select
-                                      showSearch
-                                      style={{ minWidth: 130 }}
-                                      options={names.map((n) => ({
-                                        label: n,
-                                        value: n,
-                                      }))}
-                                    />
+                                    <ExerciseSelect options={options} />
                                   </Form.Item>
                                   {(["Sets", "Reps", "Rest"] as const).map(
                                     (k, n) => (
@@ -2099,7 +2199,7 @@ function Console(): React.JSX.Element {
                                 </div>
                               ))}
                               <Button
-                                onClick={() => ops.add(blankDay().Items[0])}
+                                onClick={() => ops.add(blankItem())}
                               >
                                 添加动作
                               </Button>
@@ -2238,6 +2338,65 @@ function Console(): React.JSX.Element {
           )}
         </Modal>
         <Modal
+          open={!!removing}
+          title="删除动作"
+          onCancel={() => setRemoving(null)}
+          onOk={() => void removeExercise()}
+          okText="删除"
+          okButtonProps={{
+            danger: true,
+            disabled:
+              !refs ||
+              (mustConfirm && confirmName.trim() !== removing?.Name),
+          }}
+          confirmLoading={deleting}
+          destroyOnClose
+        >
+          {!removing ? null : !refs ? (
+            <div style={{ color: "#888" }}>正在统计引用…</div>
+          ) : (
+            <>
+              <p>
+                引用它的位置会保留动作名、降级为自建动作，可以照常训练，但失去教学详情。
+                训练记录不受影响。
+              </p>
+              {refs.Templates.length > 0 && (
+                <p>
+                  模板 {refs.Templates.length} 个：
+                  {refs.Templates.map((t) => (
+                    <Tag key={t.ID} color={t.Published ? "red" : "default"}>
+                      {t.Name}
+                      {t.Published ? "（已发布）" : ""}
+                    </Tag>
+                  ))}
+                </p>
+              )}
+              <p>
+                模板草稿 {refs.Drafts} 份、个人计划 {refs.Plans} 份。
+              </p>
+              {refs.Templates.some((t) => t.Published) && (
+                <p style={{ color: "#c0392b" }}>
+                  已发布模板在替换这个动作前不能重新发布，建议先改模板再删。
+                </p>
+              )}
+              {mustConfirm ? (
+                <>
+                  <p>
+                    请输入动作名称 <b>{removing.Name}</b> 确认：
+                  </p>
+                  <Input
+                    value={confirmName}
+                    placeholder={removing.Name}
+                    onChange={(e) => setConfirmName(e.target.value)}
+                  />
+                </>
+              ) : (
+                <p style={{ color: "#888" }}>没有模板或计划引用它，删除后不可恢复。</p>
+              )}
+            </>
+          )}
+        </Modal>
+        <Modal
           open={!!entry}
           title={entry?.ID ? "编辑动作资料" : "新增动作"}
           footer={null}
@@ -2251,6 +2410,8 @@ function Console(): React.JSX.Element {
               meta={meta}
               onDone={() => {
                 setEntry(null);
+                // 改了名字/新增/删除后，模板编辑器的候选要重新拉
+                setOptions([]);
                 void openPage("训练资料").catch(report);
               }}
             />

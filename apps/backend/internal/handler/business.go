@@ -54,7 +54,8 @@ func valid(p Plan) bool {
 		}
 		seen[d.Weekday] = true
 		for _, i := range d.Items {
-			if i.Name == "" || i.Sets < 1 || i.Sets > 30 || i.Reps < 1 || i.Reps > 200 || (i.Rest != 30 && i.Rest != 60 && i.Rest != 90) {
+			// 有 ExerciseID 的条目名称由后端按动作资料补齐，客户端不传也算合法
+			if (i.Name == "" && i.ExerciseID == 0) || i.Sets < 1 || i.Sets > 30 || i.Reps < 1 || i.Reps > 200 || (i.Rest != 30 && i.Rest != 60 && i.Rest != 90) {
 				return false
 			}
 		}
@@ -161,6 +162,10 @@ func registerPlans(g *gin.RouterGroup) {
 					return e
 				}
 				cur.Name, cur.Days, cur.Published = p.Name, p.Days, false
+				// 名称以动作资料为准：客户端拿着改名前的页面提交，也不会把旧名字写回去
+				if e := normalizeItems(tx, cur.Days); e != nil {
+					return e
+				}
 				if e := tx.Save(&cur).Error; e != nil {
 					return e
 				}
@@ -195,6 +200,13 @@ func registerPlans(g *gin.RouterGroup) {
 				if e := tx.Where("owner=0 AND published=true AND revision=?", in.Revision).First(&p, in.Template).Error; e != nil {
 					return e
 				}
+			}
+			// 统一按 ID 归一名称；ID=0 的再按名称兜底挂一次（老版本小程序不传 ID）
+			if e := normalizeItems(tx, p.Days); e != nil {
+				return e
+			}
+			if in.Template == 0 && !valid(p) {
+				return invalid("请检查训练安排")
 			}
 			p.ID = 0
 			p.OperationID = &in.Operation
@@ -441,33 +453,8 @@ func registerAdmin(g *gin.RouterGroup) {
 		var fresh Feedback
 		save(c, fresh, db.First(&fresh, row.ID).Error)
 	})
-	g.POST("/exercises", func(c *gin.Context) {
-		var x Exercise
-		if c.ShouldBindJSON(&x) != nil || x.Name == "" || x.Guide == "" || x.Equipment == "" || x.Setup == "" {
-			fail(c, 400, "请填写完整资料")
-			return
-		}
-		if msg := taxonomy(x); msg != "" {
-			fail(c, 400, msg)
-			return
-		}
-		if !imagePath(x.ImageURL) {
-			fail(c, 400, "示范图请填相对路径或 https 地址")
-			return
-		}
-		if x.ID != 0 {
-			var old Exercise
-			if e := db.First(&old, x.ID).Error; e != nil {
-				save(c, nil, e)
-				return
-			}
-			if old.Name != x.Name {
-				fail(c, 409, "已建动作名称用于关联训练模板，请新增动作")
-				return
-			}
-		}
-		save(c, x, db.Save(&x).Error)
-	})
+	// 动作资料的写操作（新增/改名/删除/引用查询）在 exercise_admin.go
+	exerciseAdminRoutes(g)
 	// 会员列表：支持按用户编号（U3M8Q2K）或纯数字 ID 查人，客服照着用户报的编号就能找到
 	g.GET("/members", func(c *gin.Context) {
 		var rows []User
