@@ -669,7 +669,7 @@ function ExerciseSelect({
     />
   );
 }
-// 「复制当日」：原样复制这天的训练部位和动作，插在它后面。
+// 「复制当日」：原样复制这天的训练部位和动作，放到训练安排的最后。
 // 训练日不用原来那天，而是往后挑一个还空着的——后端要求一份计划里每个星期几最多一天，
 // 复制出来撞了日子，发布时会被整单拦下。
 function CopyDayButton({
@@ -677,7 +677,7 @@ function CopyDayButton({
   add,
 }: {
   index: number;
-  add: (day: Day, at: number) => void;
+  add: (day: Day) => void;
 }): React.JSX.Element {
   const form = Form.useFormInstance();
   return (
@@ -697,14 +697,11 @@ function CopyDayButton({
           if (!taken.has(weekday)) break;
         }
         // Items 要逐条复制，直接传引用会让两天共享同一个数组/对象
-        add(
-          {
-            Weekday: weekday,
-            Focus: src.Focus,
-            Items: (src.Items || []).map((i) => ({ ...i })),
-          },
-          index + 1,
-        );
+        add({
+          Weekday: weekday,
+          Focus: src.Focus,
+          Items: (src.Items || []).map((i) => ({ ...i })),
+        });
       }}
     >
       复制当日
@@ -902,9 +899,15 @@ function Console(): React.JSX.Element {
             ? { Title: b.Title, Lines: b.Lines }
             : { Title: b.Title, Text: b.Text },
         );
+      // 训练日统一按周一到周日排：复制/新增经常把日子加在中间或末尾，
+      // 保存时排一次，列表和小程序里的展示顺序就固定下来了
+      const Days = [...(values.Days || [])].sort(
+        (a, b) => a.Weekday - b.Weekday,
+      );
       await api("/templates", {
         ...edit,
         ...values,
+        Days,
         Meta: {
           Cover: (meta?.Cover || "").trim(),
           Level: meta?.Level || "",
